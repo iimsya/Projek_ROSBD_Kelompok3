@@ -7,7 +7,7 @@ java_dirs = glob.glob(r"C:\Program Files\Microsoft\jdk-17*")
 if java_dirs:
     os.environ["JAVA_HOME"] = java_dirs[0]
 
-os.environ["HADOOP_HOME"] = r"D:\hadoop"
+os.environ["HADOOP_HOME"] = r"C:\hadoop"
 os.environ["PATH"] = os.environ["HADOOP_HOME"] + r"\bin;" + os.environ.get("PATH", "")
 
 # Untuk Spark di Windows
@@ -126,6 +126,7 @@ def process_stream():
         .option("kafka.bootstrap.servers", KAFKA_BROKER) \
         .option("subscribe", KAFKA_TOPIC) \
         .option("startingOffsets", "latest") \
+        .option("failOnDataLoss", "false") \
         .load()
 
     df_parsed = df_kafka.selectExpr("CAST(value AS STRING) as json_str") \
