@@ -6,6 +6,7 @@ import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianG
 import './App.css'
 
 interface EventData {
+  id: string;
   grid_id: string;
   prediction: number;
   status: string;
@@ -41,6 +42,7 @@ function App() {
   const [events, setEvents] = useState<EventData[]>([]);
   const [loading, setLoading] = useState(true);
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
+  const [fetchTime, setFetchTime] = useState<Date>(new Date());
   
   // New States for Features
   const [soundEnabled, setSoundEnabled] = useState(true);
@@ -61,8 +63,11 @@ function App() {
       if (response.ok) {
         const result: EventData[] = await response.json();
         
+        const now = new Date();
         setEvents(result);
-        setLastUpdate(new Date());
+        setLastUpdate(now);
+        setFetchTime(now);
+        setSecSinceUpdate(0);
         
         // Trigger sound if conditions met
         if (soundEnabled && audioRef.current) {
@@ -83,7 +88,7 @@ function App() {
     fetchEvents();
     const interval = setInterval(fetchEvents, 30000);
     return () => clearInterval(interval);
-  }, [soundEnabled]); 
+  }, [soundEnabled]);
 
   const formatCountdown = (event_time_str: string, prediction_days: number) => {
     try {
@@ -280,7 +285,7 @@ function App() {
                 
                 return (
                   <div 
-                    key={event.grid_id} 
+                    key={event.id || `${event.grid_id}-${event.event_time}`} 
                     className={`alert-item status-${event.status}`}
                     onClick={() => setMapCenter([event.latitude, event.longitude])}
                     style={{ cursor: 'pointer' }}
@@ -310,6 +315,11 @@ function App() {
                           <span style={{ fontSize: '0.8rem' }}>Bahaya Tinggi dalam 24 Jam</span>
                         </div>
                       )}
+
+                      {/* Timestamp data event dari Cassandra */}
+                      <div className="fetch-timestamp">
+                        <span>📡 Tercatat: {new Date(event.event_time.endsWith('Z') ? event.event_time : event.event_time + 'Z').toLocaleString('id-ID', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
+                      </div>
                     </div>
                   </div>
                 );

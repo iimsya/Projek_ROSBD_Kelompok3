@@ -89,7 +89,8 @@ def monitor_all_grids():
                     place = data.get("place", "Lokasi tidak diketahui")
                     magnitude = data.get("magnitude", 0.0)
                     
-                    alert_text = f"📍 *Lokasi*: {place} (Grid: {str(grid_id).replace('_', '\\_')} | *Telah terjadi gempa dengan Magnitudo {magnitude:.1f}*)\n"
+                    escaped_grid_id = str(grid_id).replace('_', '\\_')
+                    alert_text = f"\U0001f4cd *Lokasi*: {place} (Grid: {escaped_grid_id} | *Telah terjadi gempa dengan Magnitudo {magnitude:.1f}*)\n"
                     alert_text += f"⏳ *Countdown Susulan*: {countdown_str}"
                     
                     # Kumpulkan semua alert beserta nilai prediksinya untuk disorting nanti

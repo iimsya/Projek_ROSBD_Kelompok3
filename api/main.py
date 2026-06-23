@@ -24,6 +24,7 @@ class PredictionResponse(BaseModel):
     magnitude: float = 0.0
 
 class EventResponse(BaseModel):
+    id: str = ""
     grid_id: str
     prediction: float
     status: str
@@ -95,13 +96,14 @@ def get_all_events():
         
     try:
         rows = cassandra_session.execute(
-            "SELECT grid_id, prediction_days, status, place, time, magnitude, latitude, longitude FROM earthquake_db.latest_events"
+            "SELECT id, grid_id, prediction_days, status, place, time, magnitude, latitude, longitude FROM earthquake_db.recent_events"
         )
         
         events = []
         for row in rows:
             if row.prediction_days is not None and row.status is not None:
                 events.append(EventResponse(
+                    id=row.id if hasattr(row, 'id') else "",
                     grid_id=row.grid_id,
                     prediction=row.prediction_days,
                     status=row.status,

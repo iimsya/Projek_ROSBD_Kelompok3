@@ -10,13 +10,14 @@ java_dirs = glob.glob(r"C:\Program Files\Microsoft\jdk-17*")
 if java_dirs:
     os.environ["JAVA_HOME"] = java_dirs[0]
 
-os.environ["HADOOP_HOME"] = r"D:\hadoop"
+os.environ["HADOOP_HOME"] = r"C:\hadoop"
 os.environ["PATH"] = os.environ["HADOOP_HOME"] + r"\bin;" + os.environ.get("PATH", "")
 
 from pyspark.sql import SparkSession
 from pyspark.ml.regression import RandomForestRegressor
 from pyspark.ml.feature import VectorAssembler
 from pyspark.ml.evaluation import RegressionEvaluator
+from cassandra.cluster import Cluster
 
 DATA_PATH = os.path.join(os.path.dirname(__file__), "../dataset_gempa_bigdata.csv")
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "spark_rf_model")
@@ -94,6 +95,39 @@ def create_features_and_target(df):
     
     return df_final[cols].copy()
 
+def fetch_cassandra_data():
+    print("Mengekstrak data streaming terbaru dari Cassandra...")
+    try:
+        cluster = Cluster(['localhost'], port=9042)
+        session = cluster.connect()
+        rows = session.execute("SELECT time, latitude, longitude, depth, magnitude, place, signifikansi FROM earthquake_db.latest_events")
+        
+        data = []
+        for row in rows:
+            data.append({
+                'waktu': row.time.isoformat() if row.time else None,
+                'latitude': row.latitude,
+                'longitude': row.longitude,
+                'kedalaman': row.depth,
+                'magnitudo': row.magnitude,
+                'place': row.place,
+                'tipe': 'earthquake',
+                'signifikansi': row.signifikansi if row.signifikansi else 0.0,
+                'potensi_tsunami': 0.0,
+                'peringatan': 'none',
+                'mmi': 0.0
+            })
+            
+        df = pd.DataFrame(data)
+        if not df.empty:
+            print(f"Berhasil mengekstrak {len(df)} baris data dari Cassandra.")
+        else:
+            print("Tidak ada data baru di Cassandra.")
+        return df
+    except Exception as e:
+        print(f"Gagal mengambil data dari Cassandra: {e}")
+        return pd.DataFrame()
+
 def train_and_evaluate():
     if not os.path.exists(DATA_PATH):
         print(f"Dataset not found at {DATA_PATH}. Please run historis_ingestion.py first.")
@@ -103,6 +137,11 @@ def train_and_evaluate():
     for col in ['potensi_tsunami', 'peringatan', 'signifikansi', 'mmi']:
         if col not in df_raw.columns:
             df_raw[col] = 0.0
+
+    df_cassandra = fetch_cassandra_data()
+    if not df_cassandra.empty:
+        df_raw = pd.concat([df_raw, df_cassandra], ignore_index=True)
+        print(f"Total baris data gabungan: {len(df_raw)}")
 
     df_pd = create_features_and_target(df_raw)
     feature_cols = ['latitude', 'longitude', 'kedalaman', 'magnitudo', 

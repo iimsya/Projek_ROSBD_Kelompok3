@@ -178,21 +178,34 @@ def process_stream():
             .otherwise("LOW")
         )
 
-    # 8. Output to Cassandra
+    # 8. Output to Cassandra (Dual Write)
+    def write_to_cassandra(batch_df, batch_id):
+        # Menulis ke tabel latest_events (untuk Telegram)
+        batch_df.write \
+            .format("org.apache.spark.sql.cassandra") \
+            .mode("append") \
+            .options(table="latest_events", keyspace="earthquake_db") \
+            .save()
+            
+        # Menulis ke tabel recent_events (untuk UI)
+        batch_df.write \
+            .format("org.apache.spark.sql.cassandra") \
+            .mode("append") \
+            .options(table="recent_events", keyspace="earthquake_db") \
+            .save()
+
     query = df_final.select(
         "grid_id", "id", "time", "place", "magnitude", "longitude", 
         "latitude", "depth", "signifikansi", "energy", "is_small_eq",
         "prediction_days", "status"
     ) \
         .writeStream \
+        .foreachBatch(write_to_cassandra) \
         .outputMode("append") \
-        .format("org.apache.spark.sql.cassandra") \
-        .option("keyspace", "earthquake_db") \
-        .option("table", "latest_events") \
-        .option("checkpointLocation", "checkpoint_dir_cassandra") \
+        .option("checkpointLocation", "checkpoint_dir_cassandra_dual") \
         .start()
 
-    print("Started Spark Streaming with MLlib Prediction. Writing to Cassandra...")
+    print("Started Spark Streaming with MLlib Prediction. Dual writing to Cassandra...")
     query.awaitTermination()
 
 if __name__ == "__main__":

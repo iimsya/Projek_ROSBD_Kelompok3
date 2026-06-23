@@ -450,3 +450,25 @@ body {
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+
+/* Fetch Timestamp */
+.fetch-timestamp {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  background: rgba(123, 163, 212, 0.08);
+  border: 1px solid rgba(123, 163, 212, 0.2);
+  font-size: 0.75rem;
+  color: var(--text-tertiary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  letter-spacing: 0.01em;
+}
+
+.fetch-age {
+  margin-left: auto;
+  font-weight: 600;
+  color: var(--accent-blue);
+}
