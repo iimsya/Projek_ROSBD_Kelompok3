@@ -3,12 +3,15 @@ import time
 import requests
 from datetime import datetime, timedelta
 from kafka import KafkaProducer
+from cassandra.cluster import Cluster
 
 # Configuration
 KAFKA_BROKER = 'localhost:9092'
 KAFKA_TOPIC = 'earthquake_stream'
 USGS_URL = "https://earthquake.usgs.gov/fdsnws/event/1/query"
 POLL_INTERVAL_SEC = 60
+CASSANDRA_HOST = 'localhost'
+KEYSPACE = 'earthquake_db'
 
 print(f"Connecting to Kafka at {KAFKA_BROKER}...")
 try:
@@ -21,13 +24,35 @@ except Exception as e:
     print(f"Failed to connect to Kafka: {e}")
     exit(1)
 
+print(f"Connecting to Cassandra at {CASSANDRA_HOST}...")
+try:
+    cluster = Cluster([CASSANDRA_HOST], port=9042)
+    session = cluster.connect(KEYSPACE)
+    print("Successfully connected to Cassandra!")
+except Exception as e:
+    print(f"Failed to connect to Cassandra: {e}")
+    exit(1)
+
 # Keep track of sent earthquake IDs to avoid duplicates
 sent_ids = set()
 
+def get_last_synced_time():
+    row = session.execute("SELECT last_synced_time FROM sync_metadata WHERE id='usgs_sync'").one()
+    if row and row.last_synced_time:
+        return row.last_synced_time
+    # Default fallback if empty
+    return datetime.utcnow() - timedelta(hours=2)
+
+def update_last_synced_time(new_time):
+    session.execute(
+        "UPDATE sync_metadata SET last_synced_time = %s WHERE id='usgs_sync'",
+        (new_time,)
+    )
+
 def fetch_and_send():
-    # Fetch data from the last 2 hours to ensure we don't miss anything due to API delays
     end_time = datetime.utcnow()
-    start_time = end_time - timedelta(hours=2)
+    # Fetch from last_synced_time
+    start_time = get_last_synced_time()
     
     params = {
         "format": "geojson",
@@ -43,14 +68,19 @@ def fetch_and_send():
             features = data.get('features', [])
             
             new_events_count = 0
+            max_event_time = start_time
+            
             for feature in reversed(features): # Reverse to process oldest first
                 eq_id = feature['id']
                 if eq_id not in sent_ids:
                     prop = feature['properties']
                     geom = feature['geometry']['coordinates']
                     
-                    # Convert ms timestamp to ISO format string
-                    eq_time = datetime.utcfromtimestamp(prop['time'] / 1000.0).isoformat()
+                    event_time_dt = datetime.utcfromtimestamp(prop['time'] / 1000.0)
+                    eq_time = event_time_dt.isoformat()
+                    
+                    if event_time_dt > max_event_time:
+                        max_event_time = event_time_dt
                     
                     payload = {
                         "id": eq_id,
@@ -75,10 +105,15 @@ def fetch_and_send():
                     print(f"Sent to Kafka: {payload['id']} - Mag: {payload['magnitude']} - {payload['place']}")
             
             producer.flush()
-            if new_events_count == 0:
-                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] No new earthquakes found.")
+            
+            # Always update to max_event_time or end_time to keep moving forward
+            if new_events_count > 0:
+                update_last_synced_time(max_event_time)
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Successfully sent {new_events_count} new earthquakes. Synced up to {max_event_time}")
             else:
-                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Successfully sent {new_events_count} new earthquakes.")
+                update_last_synced_time(end_time)
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] No new earthquakes found. Synced up to {end_time}")
+                
         else:
             print(f"Failed to fetch data from USGS. Status code: {response.status_code}")
             

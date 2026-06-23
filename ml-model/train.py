@@ -96,52 +96,53 @@ def create_features_and_target(df):
     return df_final[cols].copy()
 
 def fetch_cassandra_data():
-    print("Mengekstrak data streaming terbaru dari Cassandra...")
+    print("Mengekstrak seluruh data historis dan terbaru dari Cassandra...")
     try:
         cluster = Cluster(['localhost'], port=9042)
         session = cluster.connect()
-        rows = session.execute("SELECT time, latitude, longitude, depth, magnitude, place, signifikansi FROM earthquake_db.latest_events")
+        # Transparent pagination handles large results automatically
+        rows = session.execute("SELECT * FROM earthquake_db.all_events")
         
         data = []
         for row in rows:
             data.append({
-                'waktu': row.time.isoformat() if row.time else None,
+                'id': row.id,
+                'waktu': row.time,
                 'latitude': row.latitude,
                 'longitude': row.longitude,
                 'kedalaman': row.depth,
                 'magnitudo': row.magnitude,
-                'place': row.place,
-                'tipe': 'earthquake',
+                'tempat': row.place,
+                'tipe': row.type,
+                'potensi_tsunami': row.potensi_tsunami,
+                'peringatan': row.peringatan,
                 'signifikansi': row.signifikansi if row.signifikansi else 0.0,
-                'potensi_tsunami': 0.0,
-                'peringatan': 'none',
-                'mmi': 0.0
+                'mmi': row.mmi if row.mmi else 0.0
             })
             
         df = pd.DataFrame(data)
+        cluster.shutdown()
+        
         if not df.empty:
             print(f"Berhasil mengekstrak {len(df)} baris data dari Cassandra.")
         else:
-            print("Tidak ada data baru di Cassandra.")
+            print("Tidak ada data di Cassandra.")
         return df
     except Exception as e:
         print(f"Gagal mengambil data dari Cassandra: {e}")
         return pd.DataFrame()
 
 def train_and_evaluate():
-    if not os.path.exists(DATA_PATH):
-        print(f"Dataset not found at {DATA_PATH}. Please run historis_ingestion.py first.")
+    df_raw = fetch_cassandra_data()
+    if df_raw.empty:
+        print("Data kosong. Harap jalankan init_cassandra_db.py dan pastikan Cassandra aktif.")
         return
         
-    df_raw = pd.read_csv(DATA_PATH)
     for col in ['potensi_tsunami', 'peringatan', 'signifikansi', 'mmi']:
         if col not in df_raw.columns:
             df_raw[col] = 0.0
 
-    df_cassandra = fetch_cassandra_data()
-    if not df_cassandra.empty:
-        df_raw = pd.concat([df_raw, df_cassandra], ignore_index=True)
-        print(f"Total baris data gabungan: {len(df_raw)}")
+    print(f"Total baris data yang akan dilatih: {len(df_raw)}")
 
     df_pd = create_features_and_target(df_raw)
     feature_cols = ['latitude', 'longitude', 'kedalaman', 'magnitudo', 

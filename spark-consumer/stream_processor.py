@@ -74,6 +74,28 @@ def init_cassandra():
             status text
         )
         """)
+        session.execute("""
+        CREATE TABLE IF NOT EXISTS earthquake_db.all_events (
+            id text PRIMARY KEY,
+            time timestamp,
+            magnitude double,
+            place text,
+            longitude double,
+            latitude double,
+            depth double,
+            type text,
+            potensi_tsunami text,
+            peringatan text,
+            signifikansi double,
+            mmi double
+        )
+        """)
+        session.execute("""
+        CREATE TABLE IF NOT EXISTS earthquake_db.sync_metadata (
+            id text PRIMARY KEY,
+            last_synced_time timestamp
+        )
+        """)
         session.shutdown()
         cluster.shutdown()
         print("Cassandra siap!")
@@ -192,6 +214,18 @@ def process_stream():
             .format("org.apache.spark.sql.cassandra") \
             .mode("append") \
             .options(table="recent_events", keyspace="earthquake_db") \
+            .save()
+            
+        # Menulis ke tabel all_events (sebagai Single Source of Truth)
+        # Select the columns that exist in all_events schema
+        all_events_df = batch_df.select(
+            "id", "time", "magnitude", "place", "longitude", "latitude", "depth",
+            "type", "potensi_tsunami", "peringatan", "signifikansi", "mmi"
+        )
+        all_events_df.write \
+            .format("org.apache.spark.sql.cassandra") \
+            .mode("append") \
+            .options(table="all_events", keyspace="earthquake_db") \
             .save()
 
     query = df_final.select(
