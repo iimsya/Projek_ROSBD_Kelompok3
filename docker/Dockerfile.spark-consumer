@@ -1,0 +1,27 @@
+FROM python:3.11-slim
+
+# Install Java JRE (needed for Spark) and other essentials
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    default-jre-headless \
+    procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set JAVA_HOME pointing to the default java symlink
+ENV JAVA_HOME=/usr/lib/jvm/default-java
+
+WORKDIR /app
+
+ENV PYTHONUNBUFFERED=1
+
+# Install Python dependencies
+RUN pip install --no-cache-dir pyspark==3.5.0 pandas cassandra-driver
+
+# Copy the consumer code, ml-model, and other required assets
+COPY spark-consumer/ /app/spark-consumer/
+COPY ml-model/ /app/ml-model/
+
+# Set working directory to the spark-consumer folder
+WORKDIR /app/spark-consumer
+
+# Run the stream processor
+CMD ["python", "stream_processor.py"]

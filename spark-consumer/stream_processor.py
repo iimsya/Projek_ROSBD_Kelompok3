@@ -1,18 +1,20 @@
 import os
 import glob
 import sys
+import platform
 
-# Konfigurasi otomatis Environment Variables untuk Java 17 dan Hadoop Winutils
-java_dirs = glob.glob(r"C:\Program Files\Microsoft\jdk-17*")
-if java_dirs:
-    os.environ["JAVA_HOME"] = java_dirs[0]
+# Konfigurasi otomatis Environment Variables untuk Java 17 dan Hadoop Winutils (Hanya di Windows)
+if platform.system() == "Windows":
+    java_dirs = glob.glob(r"C:\Program Files\Microsoft\jdk-17*")
+    if java_dirs:
+        os.environ["JAVA_HOME"] = java_dirs[0]
 
-os.environ["HADOOP_HOME"] = r"D:\hadoop"
-os.environ["PATH"] = os.environ["HADOOP_HOME"] + r"\bin;" + os.environ.get("PATH", "")
+    os.environ["HADOOP_HOME"] = r"D:\hadoop"
+    os.environ["PATH"] = os.environ["HADOOP_HOME"] + r"\bin;" + os.environ.get("PATH", "")
 
-# Untuk Spark di Windows
-os.environ['PYSPARK_PYTHON'] = sys.executable
-os.environ['PYSPARK_DRIVER_PYTHON'] = sys.executable
+    # Untuk Spark di Windows
+    os.environ['PYSPARK_PYTHON'] = sys.executable
+    os.environ['PYSPARK_DRIVER_PYTHON'] = sys.executable
 
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
@@ -25,11 +27,11 @@ from pyspark.ml.regression import RandomForestRegressionModel
 from pyspark.ml.feature import VectorAssembler
 import pandas as pd
 
-# Configuration
-KAFKA_BROKER = "localhost:9092"
-KAFKA_TOPIC = "earthquake_stream"
-CASSANDRA_HOST = "localhost"
-CASSANDRA_PORT = "9042"
+# Configuration (Supports Environment Variables)
+KAFKA_BROKER = os.getenv("KAFKA_BROKER", "localhost:9092")
+KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "earthquake_stream")
+CASSANDRA_HOST = os.getenv("CASSANDRA_HOST", "localhost")
+CASSANDRA_PORT = os.getenv("CASSANDRA_PORT", "9042")
 
 schema = StructType([
     StructField("id", StringType(), True),
@@ -91,6 +93,7 @@ def create_spark_session():
         .config("spark.sql.streaming.checkpointLocation", "checkpoint_dir") \
         .config("spark.cassandra.connection.host", CASSANDRA_HOST) \
         .config("spark.cassandra.connection.port", CASSANDRA_PORT) \
+        .config("spark.hadoop.fs.file.impl", "org.apache.hadoop.fs.RawLocalFileSystem") \
         .getOrCreate()
     
     spark.sparkContext.setLogLevel("WARN")

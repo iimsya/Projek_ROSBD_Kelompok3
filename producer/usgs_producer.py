@@ -4,8 +4,10 @@ import requests
 from datetime import datetime, timedelta
 from kafka import KafkaProducer
 
+import os
+
 # Configuration
-KAFKA_BROKER = 'localhost:9092'
+KAFKA_BROKER = os.getenv('KAFKA_BROKER', 'localhost:9092')
 KAFKA_TOPIC = 'earthquake_stream'
 USGS_URL = "https://earthquake.usgs.gov/fdsnws/event/1/query"
 POLL_INTERVAL_SEC = 60

@@ -1,0 +1,14 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+ENV PYTHONUNBUFFERED=1
+
+# Install dependencies (use kafka-python-ng for better compatibility on newer Python)
+RUN pip install --no-cache-dir kafka-python-ng requests
+
+# Copy the producer script into the container
+COPY producer/usgs_producer.py .
+
+# Run the producer script
+CMD ["python", "usgs_producer.py"]

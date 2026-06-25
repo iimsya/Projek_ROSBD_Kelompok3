@@ -41,6 +41,28 @@ services:
     volumes:
       - cassandra_data:/var/lib/cassandra
 
+  producer:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.producer
+    container_name: usgs_producer
+    environment:
+      - KAFKA_BROKER=kafka:29092
+    depends_on:
+      - kafka
+
+  spark-consumer:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.spark-consumer
+    container_name: spark_consumer
+    environment:
+      - KAFKA_BROKER=kafka:29092
+      - CASSANDRA_HOST=cassandra
+    depends_on:
+      - kafka
+      - cassandra
+
 volumes:
   zookeeper_data:
   zookeeper_log:
