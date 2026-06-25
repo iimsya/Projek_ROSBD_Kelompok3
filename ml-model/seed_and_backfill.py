@@ -240,11 +240,14 @@ def save_latest_features(df_features: pd.DataFrame, minio_client=None, version=N
         upload_features(minio_client, path, version)
 
 
-def predict_and_update(df_features: pd.DataFrame, minio_client=None):
+def predict_and_update(df_features: pd.DataFrame, minio_client=None) -> int:
     from pyspark.sql import SparkSession
     from pyspark.ml.regression import RandomForestRegressionModel
     from pyspark.ml.feature import VectorAssembler
     import traceback
+
+    os.environ['PYSPARK_PYTHON'] = sys.executable
+    os.environ['PYSPARK_DRIVER_PYTHON'] = sys.executable
 
     model_dir = os.path.join(os.path.dirname(__file__), 'spark_rf_model')
 
@@ -272,7 +275,7 @@ def predict_and_update(df_features: pd.DataFrame, minio_client=None):
 
     if not os.path.exists(model_dir):
         print("  Model not found locally or in MinIO. Skipping prediction.")
-        return
+        return 0
 
     try:
         spark = SparkSession.builder \
@@ -362,6 +365,7 @@ def predict_and_update(df_features: pd.DataFrame, minio_client=None):
 
     spark.stop()
     print(f"  Updated {inserted} grids in latest_events.")
+    return inserted
 
 
 def main():
@@ -405,11 +409,12 @@ def main():
     seed_version = version_tag()
     save_latest_features(df_features, minio_client, seed_version)
 
-    predict_and_update(df_features, minio_client)
+    predicted = predict_and_update(df_features, minio_client)
 
     print("\n=== Seed & Backfill Complete ===")
     print(f"Total events in earthquake_history: {len(df_history)}")
-    print(f"Grids with predictions: {df_features['grid_id'].nunique()}")
+    print(f"Grids with feature grids: {df_features['grid_id'].nunique()}")
+    print(f"Actual predictions inserted to latest_events: {predicted}")
 
 
 if __name__ == "__main__":
