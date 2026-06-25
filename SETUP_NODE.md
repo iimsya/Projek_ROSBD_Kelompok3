@@ -89,21 +89,20 @@ uv run ml-model/retrain_flow.py
 
 Verifikasi MinIO: buka `http://localhost:9001` (login: `minioadmin`/`minioadmin`), cek bucket `ml-models` ada, ada folder `v_*/` dengan model + features.
 
-**d. Seed data & backfill (download model dari MinIO, predict, insert)**
+**d. Seed data ke earthquake_history (tanpa predict)**
 
-⚠️ **Step c (train + retrain) WAJIB jalan duluan** — `seed_and_backfill.py` butuh model di MinIO (tag BEST).
+⚠️ **Step c (train + retrain) WAJIB jalan duluan** — `seed_and_backfill.py` butuh model di MinIO untuk upload features.
 
 ```bash
 uv run ml-model/seed_and_backfill.py
 ```
 
+**Catatan:** seed sekarang **hanya mengisi `earthquake_history`** (CSV + backfill USGS) dan upload features ke MinIO. **Predict ke `latest_events` dilakukan oleh `stream_processor.py`** saat startup (catchup USGS API) dan real-time (Kafka).
+
 Verifikasi:
 ```bash
-docker exec -it cassandra cqlsh -e "SELECT count(*) FROM earthquake_db.latest_events;"
 docker exec -it cassandra cqlsh -e "SELECT count(*) FROM earthquake_db.earthquake_history;"
 ```
-
-> **Catatan:** `seed_and_backfill.py` idempotent — kalau data CSV udah ada di Cassandra, dia skip bulk insert. Kalau USGS data masih <1 jam, skip backfill. Aman di-run berkali-kali.
 
 **e. Jalankan FastAPI**
 ```bash
@@ -199,18 +198,29 @@ Semua harus `Connection succeeded`.
 rm -rf checkpoint_dir_*
 ```
 
-**d. Jalankan Spark Streaming**
+**d. Hapus checkpoint lama** (kalau fresh start atau ada perubahan offset)
+```bash
+rm -rf checkpoint_dir_*
+```
+
+**e. Jalankan Spark Streaming**
 ```bash
 screen -S stream
 uv run spark-consumer/stream_processor.py
 ```
 Detach: `Ctrl+A D`
 
+> **Apa yang terjadi saat startup:**
+> 1. Download model & features dari MinIO (BEST)
+> 2. **Catchup USGS API** → ambil event dari `last_ts` di `earthquake_history` sampai `now`
+> 3. Predict semua event catchup → insert ke `earthquake_history` + `latest_events` → **ACTIVE predictions** ✅
+> 4. Start Kafka streaming (real-time) untuk event baru
+
 ### Health Check
 ```bash
 # Cek log
 tail -F spark_stream_output.log
-# Harusnya ada: "writeBatch to Cassandra: 1 rows" tiap menit
+# Harusnya ada: "Catching up from USGS", "Predicted X catchup events", "writeBatch to Cassandra"
 
 # Verifikasi data masuk ke Cassandra (dari L2)
 docker exec -it cassandra cqlsh -e "SELECT count(*) FROM earthquake_db.latest_events;"
@@ -229,7 +239,7 @@ docker exec -it cassandra cqlsh -e "SELECT count(*) FROM earthquake_db.latest_ev
               ↓ (tunggu 30 detik sampai Cassandra ready)
               train.py + retrain_flow.py   ⚠️ WAJIB — upload model ke MinIO + tag BEST
               ↓
-              seed_and_backfill.py          ⚠️ WAJIB — download BEST → predict → latest_events
+              seed_and_backfill.py          ⚠️ WAJIB — seed CSV ke earthquake_history
               ↓
               FastAPI (api/main.py)
               ↓
@@ -237,7 +247,11 @@ docker exec -it cassandra cqlsh -e "SELECT count(*) FROM earthquake_db.latest_ev
               ↓
               Telegram Bot (bot.py)
 
- 3️⃣ Laptop 1  stream_processor.py
+  3️⃣ Laptop 1  stream_processor.py
+              ↓
+              Catchup USGS API → predict → latest_events (ACTIVE ✅)
+              ↓ (lanjut)
+              Kafka stream real-time
 ```
 
 > **PENTING:** Laptop 2 harus selesai start (Cassandra + MinIO + API) sebelum Laptop 1 jalan, karena L1 nulis prediksi ke Cassandra & polling model dari MinIO.
@@ -272,5 +286,6 @@ docker exec -it cassandra cqlsh -e "SELECT count(*) FROM earthquake_db.latest_ev
 | `No module named 'pyspark'` | `uv sync` dulu, pastikan pyspark di pyproject.toml |
 | Cassandra write slow | Cek network latency L1 → L2 via Tailscale |
 | Model not found | `retrain_flow.py` atau `train.py` harus jalan minimal sekali di L2 (upload model ke MinIO) |
-| `latest_events` masih 0 setelah seed | Cek tag BEST: `uv run python -c "from minio_utils import get_client, get_best_version; mc = get_client(); print('BEST =', get_best_version(mc))"` — kalau None, jalanin `retrain_flow.py` dulu |
+| `latest_events` masih 0 setelah seed | Normal — seed sekarang gak predict. `stream_processor.py` yang akan isi via catchup USGS + Kafka |
+| `latest_events` masih 0 setelah stream | Cek log stream: apakah ada "Catching up from USGS" dan "Predicted X events"? Kalau 0, mungkin `last_ts` terlalu lama atau USGS API bermasalah |
 | Features not found | `retrain_flow.py` atau `seed_and_backfill.py` harus jalan minimal sekali (upload features ke MinIO) |

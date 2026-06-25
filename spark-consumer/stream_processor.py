@@ -3,6 +3,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ml-model"))
 
 os.environ['PYSPARK_PYTHON'] = sys.executable
 os.environ['PYSPARK_DRIVER_PYTHON'] = sys.executable
@@ -225,6 +226,134 @@ def start_queries(spark, rf_model, df_history):
     return q_history, q_pred
 
 
+def catchup_from_usgs(spark, rf_model, df_history):
+    """Fetch USGS events from last history timestamp → now, predict, insert."""
+    from datetime import datetime, timezone, timedelta
+    import requests
+    import numpy as np
+    from cassandra.cluster import Cluster
+
+    cluster_cql = Cluster([CASSANDRA_HOST], port=int(CASSANDRA_PORT))
+    session_cql = cluster_cql.connect()
+    row = session_cql.execute("SELECT MAX(time) as max_ts FROM earthquake_db.earthquake_history").one()
+    last_ts = row.max_ts if row and row.max_ts else None
+    session_cql.shutdown()
+    cluster_cql.shutdown()
+
+    if last_ts:
+        if last_ts.tzinfo is None:
+            last_ts = last_ts.replace(tzinfo=timezone.utc)
+        print(f"Last event in history: {last_ts}")
+
+    now = datetime.now(timezone.utc)
+    if last_ts and (now - last_ts).total_seconds() < 3600:
+        print("  Data up to date (<1h), skipping USGS catchup.")
+        return
+
+    start_str = (last_ts if last_ts else now - timedelta(days=7)).strftime('%Y-%m-%dT%H:%M:%S')
+    end_str = now.strftime('%Y-%m-%dT%H:%M:%S')
+    print(f"Catching up from USGS: {start_str} → {end_str}")
+
+    params = {"format": "geojson", "starttime": start_str, "endtime": end_str, "minmagnitude": "2.5"}
+    try:
+        resp = requests.get("https://earthquake.usgs.gov/fdsnws/event/1/query", params=params, timeout=30)
+        if resp.status_code != 200:
+            print(f"  USGS API error: {resp.status_code}")
+            return
+        features = resp.json().get('features', [])
+        print(f"  Got {len(features)} events from USGS.")
+    except Exception as e:
+        print(f"  USGS fetch failed: {e}")
+        return
+
+    if not features:
+        print("  No new events.")
+        return
+
+    rows = []
+    for f in features:
+        prop = f['properties']
+        geom = f['geometry']['coordinates']
+        ts = datetime.utcfromtimestamp(prop['time'] / 1000.0)
+        lat, lon = geom[1], geom[0]
+        grid_lat = np.floor(lat / 1.0) * 1.0
+        grid_lon = np.floor(lon / 1.0) * 1.0
+        grid_id = f"{grid_lat:.2f}_{grid_lon:.2f}"
+        rows.append({
+            'grid_id': grid_id,
+            'id': f['id'],
+            'waktu': ts,
+            'place': prop.get('place', ''),
+            'magnitudo': prop['mag'],
+            'longitude': lon,
+            'latitude': lat,
+            'kedalaman': geom[2],
+            'signifikansi': prop.get('sig', 0),
+            'energy': 10 ** (4.8 + 1.5 * prop['mag']),
+            'is_small_eq': 1 if prop['mag'] < 4.5 else 0,
+        })
+
+    df_catchup = spark.createDataFrame(pd.DataFrame(rows))
+    df_joined = df_catchup.join(df_history, "grid_id", "left").fillna(0.0)
+
+    assembler = VectorAssembler(
+        inputCols=['latitude', 'longitude', 'kedalaman', 'magnitudo',
+                   'energy_accum_7d', 'energy_accum_30d', 'energy_accum_90d',
+                   'small_eq_freq_30d', 'signifikansi'],
+        outputCol="features"
+    )
+    df_assembled = assembler.transform(df_joined)
+    df_pred = rf_model.transform(df_assembled)
+    predictions = df_pred.collect()
+    print(f"  Predicted {len(predictions)} catchup events.")
+
+    cluster_cql = Cluster([CASSANDRA_HOST], port=int(CASSANDRA_PORT))
+    session_cql = cluster_cql.connect()
+    insert_history = session_cql.prepare("""
+    INSERT INTO earthquake_db.earthquake_history
+        (grid_id, time, id, place, magnitude, longitude, latitude, depth,
+         signifikansi, energy, is_small_eq)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """)
+    insert_pred = session_cql.prepare("""
+    INSERT INTO earthquake_db.latest_events
+        (grid_id, id, time, place, magnitude, longitude, latitude, depth,
+         signifikansi, energy, is_small_eq, prediction_days, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """)
+
+    inserted = 0
+    for row in predictions:
+        pred_days = round(float(row.prediction), 2)
+        if pred_days <= 1.0:
+            status = "HIGH"
+        elif pred_days <= 3.0:
+            status = "MEDIUM"
+        else:
+            status = "LOW"
+        try:
+            session_cql.execute(insert_history, (
+                row.grid_id, row.waktu, row.id, row.place,
+                float(row.magnitudo), float(row.longitude), float(row.latitude),
+                float(row.kedalaman), float(row.signifikansi),
+                float(row.energy), int(row.is_small_eq)
+            ))
+            session_cql.execute(insert_pred, (
+                row.grid_id, row.id, row.waktu, row.place,
+                float(row.magnitudo), float(row.longitude), float(row.latitude),
+                float(row.kedalaman), float(row.signifikansi),
+                float(row.energy), int(row.is_small_eq),
+                pred_days, status
+            ))
+            inserted += 1
+        except Exception as e:
+            print(f"  [ERROR] Insert failed for {row.grid_id}: {e}")
+
+    session_cql.shutdown()
+    cluster_cql.shutdown()
+    print(f"  Inserted {inserted} catchup events to earthquake_history + latest_events.")
+
+
 def process_stream():
     init_cassandra()
     spark = create_spark_session()
@@ -245,6 +374,10 @@ def process_stream():
         print("Using local model files")
 
     rf_model, df_history = load_model_and_features(spark, MODEL_PATH, FEATURES_PATH)
+
+    # Catchup: ambil USGS dari last_ts → now, predict, insert ke Cassandra
+    catchup_from_usgs(spark, rf_model, df_history)
+
     q1, q2 = start_queries(spark, rf_model, df_history)
     print(f"Started Spark Streaming: raw → earthquake_history, predictions → latest_events")
 
