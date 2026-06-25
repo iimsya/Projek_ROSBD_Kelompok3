@@ -30,18 +30,24 @@ docker compose -f docker-compose-vps.yml ps
 # Harusnya ada: zookeeper-1, kafka-1  (keduanya Up)
 ```
 
-**d. Jalankan USGS Producer**
+**d. Semua service (Zookeeper + Kafka + Producer) jalan bareng**
 ```bash
-screen -S producer
-uv run producer/usgs_producer.py
+cd docker
+docker compose -f docker-compose-vps.yml up -d
 ```
-Detach screen: `Ctrl+A D`
+
+**e. Cek log producer**
+```bash
+docker logs usgs_producer --tail 20
+# Harus ada: "Connected to Kafka!", "No new earthquakes found." tiap 60 detik
+```
 
 ### Health Check
 ```bash
 nc -zv 168.144.97.105 9092
 # Harus: Connection succeeded
-docker logs kafka-1 --tail 20
+docker compose -f docker-compose-vps.yml ps
+# zookeeper, kafka, usgs_producer — semuanya Up
 ```
 
 ---
@@ -232,8 +238,8 @@ docker exec -it cassandra cqlsh -e "SELECT count(*) FROM earthquake_db.latest_ev
 
 ```
  1️⃣ VPS       docker compose -f docker-compose-vps.yml up -d
-              ↓ (tunggu 15 detik)
-              usgs_producer.py
+              (Zookeeper + Kafka + Producer otomatis jalan)
+              ↓ (tunggu 30 detik, producer nunggu Kafka healthy)
 
   2️⃣ Laptop 2  docker compose -f docker-compose-l2.yml up -d
               ↓ (tunggu 30 detik sampai Cassandra ready)
@@ -260,12 +266,14 @@ docker exec -it cassandra cqlsh -e "SELECT count(*) FROM earthquake_db.latest_ev
 
 ## Troubleshooting
 
-### Kafka
+### VPS
 | Gejala | Solusi |
 |---|---|
 | `Connection refused` ke Kafka | Cek firewall VPS port 9092, cek `docker ps` di VPS |
 | Producer error `NodeExists` | `docker compose -f docker-compose-vps.yml down -v && docker compose -f docker-compose-vps.yml up -d` |
-| Consumer `failOnDataLoss` | Hapus `checkpoint_dir_*` di L1, restart stream |
+| Producer gak jalan | `docker logs usgs_producer` — cek error, kalau dependensi gagal, `docker compose -f docker-compose-vps.yml restart producer` |
+| SSH disconnect → producer tetap jalan ✅ | Producer di Docker dengan `restart: always` — otomatis restart |
+| Reboot VPS → semua mati | ❌ Docker container gak auto-start. Fix: `systemctl enable docker` dan pake `restart: always` (udah) |
 
 ### Cassandra (L2)
 | Gejala | Solusi |
