@@ -7,45 +7,36 @@
 graph TB
     USGS("🌐 USGS API"):::external
 
-    subgraph SRV["Server (Computer 1)"]
+    subgraph VPS["VPS (Computer 1)"]
         direction TB
+        ZK("Zoo\nkeeper\n2181"):::infra
+        KF("Kafka\n9092"):::infra
+        P("USGS\nProducer"):::app
+    end
 
-        subgraph DKR["Docker Containers"]
-            ZK("Zoo\nkeeper 2181"):::infra
-            KF("Kafka\n9092"):::infra
-            CS("Cassandra\n9042"):::infra
-            MN("MinIO\n9000"):::infra
-        end
+    subgraph L1["Laptop 1 (Consumer + Predictor)"]
+        SK("Spark\nStreaming"):::app
+    end
 
-        P("USGS Producer"):::app
-        SK("Spark Streaming"):::app
-        API("FastAPI\n8000"):::app
+    subgraph L2["Laptop 2 (Server Utama)"]
+        direction TB
+        CS("Cassandra\n9042"):::infra
+        MN("MinIO\n9000"):::infra
+        FA("FastAPI\n8000"):::app
         DS("Dashboard\n5173"):::app
-        BT("Telegram Bot"):::app
+        RF("Prefect +\nSpark Retrain"):::app2
     end
 
-    subgraph LPT["Training Laptop (Computer 2 - opsional)"]
-        RF("ML Retrain Flow"):::app2
-    end
-
-    USGS -. "fetch tiap 1 menit" .-> P
-    P -->|"send earthquake_stream"| KF
+    USGS -. "fetch 1m" .-> P
+    P -->|"Kafka"| KF
     KF -->|"consume"| SK
-    SK -.->|"load BEST model"| MN
-    SK -->|"write raw events"| CS
-    SK -->|"write predictions"| CS
-    CS -.->|"bulk read history"| RF
-    MN -.->|"upload model + features"| RF
-    RF -.->|"update BEST / LATEST"| MN
-    CS -->|"query"| API
-    API -->|"/api/recent"| DS
-    API -->|"/api/events"| DS
-    API -->|"/api/accuracy"| DS
-    API -->|"/api/verification"| DS
-    API -->|"polling"| BT
-
+    SK -->|"write"| CS
+    SK -.->|"load BEST"| MN
+    MN -.->|"upload model"| RF
+    CS -.->|"read history"| RF
+    CS -->|"query"| FA
+    FA -->|"HTTP"| DS
     ZK -.-> KF
-    ZK -.-> SK
 
     classDef external fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
     classDef infra fill:#e3f2fd,stroke:#1565c0,stroke-width:1px
@@ -53,77 +44,137 @@ graph TB
     classDef app2 fill:#f3e5f5,stroke:#6a1b9a,stroke-width:1px
 ```
 
-> **Legend:** ➡️ data flow (streaming / request) · ╌╌╌ periodic / batch
+> **Legend:** ➡️ data streaming · ╌╌╌ periodic/batch · warna: 🟢 external · 🔵 infra · 🟠 app · 🟣 training
 
-Alur lengkap:
-1. **USGS Producer** fetch gempa dari USGS API → kirim ke **Kafka**
-2. **Spark Streaming** consume dari Kafka → feature eng + prediksi → simpan ke **Cassandra**
-3. **Spark Streaming** load model dari **MinIO** (tag `BEST`), reload otomatis tiap 5 menit
-4. **FastAPI** baca dari Cassandra → serve ke **Dashboard** & **Telegram Bot**
-5. **Retrain Flow** (opsional, bisa dari laptop terpisah) baca semua history dari Cassandra → train → upload ke MinIO → champion/challenger
+Alur:
+1. **VPS** → USGS Producer fetch gempa → Kafka (retention 7 hari)
+2. **Laptop 1** → Spark Streaming consume Kafka → predict → write ke Cassandra L2
+3. **Laptop 2** → Cassandra simpan semua data → FastAPI serve → Dashboard tampil
+4. **Laptop 2** → Prefect retrain periodik baca Cassandra → train → upload ke MinIO
+5. **Laptop 1** → Polling MinIO L2 tiap 5 menit, reload model BEST
 
 ---
 
-## Prerequisites
+## Prerequisites (Semua Komputer)
 
-- Docker & Docker Compose
 - Python 3.14+, `uv`
-- Node.js 18+, npm
-- Java 17 (untuk Spark)
-- Minimal 8GB RAM, 20GB free disk
+- Java 17 (khusus yang jalan Spark: Laptop 1 & L2)
+- Node.js 18+, npm (khusus Laptop 2 untuk Dashboard)
+- Docker & Docker Compose (khusus VPS & Laptop 2)
 
-## 1. Clone & Environment
+---
+
+## Setup VPS (Kafka Broker + Producer)
+
+### 1. Clone & Environment
 
 ```bash
 git clone <repo-url>
 cd Projek_ROSBD_Kelompok3
-
-# Buat virtual env & install dependencies
 uv venv
 source .venv/bin/activate
 uv sync
-
-# Install dashboard dependencies
-cd dashboard && npm install && cd ..
 ```
 
-## 2. Start Infrastructure (Docker)
+### 2. Start Docker (Zookeeper + Kafka)
 
 ```bash
-docker compose -f docker/docker-compose.yml up -d
+docker compose -f docker/docker-compose-vps.yml up -d
 ```
 
-Menjalankan: **Zookeeper** (2181), **Kafka** (9092), **Cassandra** (9042), **MinIO** (9000/9001).
-
-Cek status:
+Cek:
 
 ```bash
 docker ps
-# Semua container harus "healthy" atau "Up"
+# zookeeper & kafka harus healthy
 ```
 
-## 3. Seed & Backfill (Bulk CSV + Backfill USGS + Initial Predictions)
+### 3. Verifikasi Kafka Advertised Listeners
 
-Memasukkan data historis CSV, mengambil gap data dari USGS, komputasi feature,
-dan membuat prediksi awal untuk semua grid.
+Pastikan IP di `docker/docker-compose-vps.yml` sudah sesuai IP publik VPS:
+
+```yaml
+KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://168.144.97.105:9092
+```
+
+Jika sudah, restart:
+
+```bash
+docker compose -f docker/docker-compose-vps.yml down
+docker compose -f docker/docker-compose-vps.yml up -d
+```
+
+### 4. Start USGS Producer
+
+```bash
+uv run producer/usgs_producer.py &
+```
+
+Cek log: `"Successfully sent N new earthquakes."`
+
+### 5. Config `.env` VPS
+
+```env
+KAFKA_BROKER=localhost:9092
+# CASSANDRA_HOST & MINIO tidak perlu (tidak ada di VPS)
+```
+
+---
+
+## Setup Laptop 2 (Cassandra + MinIO + FastAPI + Dashboard + Retrain)
+
+### 1. Clone & Environment
+
+```bash
+git clone <repo-url>
+cd Projek_ROSBD_Kelompok3
+uv venv
+source .venv/bin/activate
+uv sync
+cd dashboard && npm install && cd ..
+```
+
+### 2. Start Docker (Cassandra + MinIO)
+
+```bash
+docker compose -f docker/docker-compose-l2.yml up -d
+```
+
+Cek:
+
+```bash
+docker ps
+# cassandra & minio harus healthy
+```
+
+### 3. Config `.env` Laptop 2
+
+```env
+KAFKA_BROKER=168.144.97.105:9092
+CASSANDRA_HOST=localhost
+MINIO_ENDPOINT=localhost:9000
+```
+
+> **Catatan:** `KAFKA_BROKER` untuk akses ke VPS. `CASSANDRA_HOST` & `MINIO_ENDPOINT` lokal karena Cassandra & MinIO jalan di Laptop 2 sendiri. Pastikan Laptop 2 bisa reach VPS via `ping 168.144.97.105`.
+
+### 4. Seed & Backfill (Bulk CSV + Inisialisasi Cassandra)
 
 ```bash
 uv run ml-model/seed_and_backfill.py
 ```
 
-Proses ini akan:
-1. **Create schema** (keyspace + tabel di Cassandra)
-2. **Bulk insert CSV** (`dataset_gempa_bigdata.csv`) → `earthquake_history`
-3. **Backfill gap** dari timestamp terakhir CSV sampai sekarang dari USGS API
-4. **Compute features** → simpan `ml-model/latest_features.json`
-5. **Predict** semua grid dengan model lokal → upsert `latest_events`
+Proses:
+1. Create keyspace & tabel di Cassandra
+2. Bulk insert CSV → `earthquake_history`
+3. Backfill gap dari USGS
+4. Compute features → `latest_features.json`
+5. Predict semua grid dengan model lokal → `latest_events`
 
-Tunggu hingga log muncul: `"Seed & Backfill Complete"`.
+Tunggu: `"Seed & Backfill Complete"`
 
-## 4. MinIO Init (Bucket & Model Seed)
+### 5. MinIO Init
 
-Pastikan MinIO sudah ready (`docker ps | grep minio`).
-Buat bucket dan upload model + features pertama ke MinIO:
+Upload model + features pertama ke MinIO:
 
 ```bash
 uv run python3 -c "
@@ -144,44 +195,13 @@ print(f'Bucket ready, BEST = {v}')
 "
 ```
 
-Akses console: **http://localhost:9001** (user: `minioadmin`, pass: `minioadmin`).
+Akses console: **http://localhost:9001** (user: `minioadmin`, pass: `minioadmin`)
 
-## 5. Start Spark Streaming (Real-time)
-
-Mulai consume event baru dari Kafka dan prediksi real-time.
-Streaming otomatis load model dari MinIO (tag `BEST`) atau fallback ke lokal.
-
-```bash
-uv run spark-consumer/stream_processor.py &
-```
-
-Tunggu hingga log muncul: `"Started Spark Streaming"`.
-Setiap 5 menit streaming akan polling MinIO untuk cek model BEST baru.
-
-> **Catatan**: Jika restart, hapus checkpoint yang corrupt:
-> ```bash
-> pkill -f stream_processor
-> rm -rf checkpoint_dir_cassandra checkpoint_dir_history
-> uv run spark-consumer/stream_processor.py &
-> ```
-
-## 6. Start USGS Producer
-
-Mengirim data gempa real-time dari USGS ke Kafka.
-
-```bash
-uv run producer/usgs_producer.py &
-```
-
-Cek log: `"Successfully sent N new earthquakes."`
-
-## 7. Start FastAPI API
+### 6. Start FastAPI
 
 ```bash
 uv run api/main.py &
 ```
-
-Server API berjalan di **http://localhost:8000**.
 
 Cek:
 
@@ -190,83 +210,122 @@ curl http://localhost:8000/api/recent?limit=5
 curl http://localhost:8000/api/accuracy
 ```
 
-## 8. Start Dashboard
+### 7. Start Dashboard
 
 ```bash
 cd dashboard && npm run dev &
 ```
 
-Vite dev server di **http://localhost:5173**.
+Buka **http://localhost:5173**.
 
-## 9. Start Telegram Bot
-
-```bash
-uv run telegram-bot/bot.py &
-```
-
-Bot mengirim alert prediksi active + verifiable ke grup Telegram.
-
-## 10. Retrain Model (Manual / Otomatis)
-
-Retrain membaca semua `earthquake_history` dari Cassandra, melatih ulang model,
-lalu upload ke MinIO dengan champion/challenger (compare MAE dengan BEST).
-
-### Manual
-
-```bash
-uv run ml-model/train.py
-```
-
-### Otomatis (Prefect)
+### 8. Start Retrain (Prefect)
 
 ```bash
 uv run ml-model/retrain_flow.py &
 ```
 
-Prefect akan menjalankan ulang tiap jam 03:00. Hasil training akan:
+Prefect menjadwalkan retrain tiap jam 03:00. Otomatis:
+1. Baca semua `earthquake_history` dari Cassandra
+2. Feature engineering
+3. Train Random Forest
+4. Upload model + features + metrics ke MinIO (`v_{timestamp}/`)
+5. Bandingkan MAE dengan model `BEST`
+6. Update `BEST` kalau lebih bagus
 
-1. Save model ke `ml-model/spark_rf_model/` + `latest_features.json`
-2. Upload model + features + metrics ke MinIO (`v_{timestamp}/`)
-3. Bandingkan MAE dengan model `BEST` saat ini
-4. Update `BEST` kalau lebih bagus (champion/challenger)
+### 9. Start Telegram Bot (Opsional)
 
-## 11. Verifikasi
+```bash
+uv run telegram-bot/bot.py &
+```
+
+---
+
+## Setup Laptop 1 (Spark Streaming - Consumer + Predictor)
+
+### 1. Clone & Environment
+
+```bash
+git clone <repo-url>
+cd Projek_ROSBD_Kelompok3
+uv venv
+source .venv/bin/activate
+uv sync
+```
+
+### 2. Config `.env` Laptop 1
+
+```env
+KAFKA_BROKER=168.144.97.105:9092
+CASSANDRA_HOST=100.68.78.82
+MINIO_ENDPOINT=100.68.78.82:9000
+```
+
+> `CASSANDRA_HOST` & `MINIO_ENDPOINT` pakai IP Tailscale Laptop 2 agar koneksi aman. Pastikan Laptop 1 sudah join Tailscale dan bisa `ping 100.68.78.82`.
+
+### 3. Start Spark Streaming
+
+```bash
+uv run spark-consumer/stream_processor.py &
+```
+
+Tunggu: `"Started Spark Streaming"`.
+
+Streaming akan:
+1. Consume Kafka dari VPS (`KAFKA_BROKER`)
+2. Feature engineering + ML predict
+3. Write hasil ke Cassandra Laptop 2 (`CASSANDRA_HOST`)
+4. Polling MinIO Laptop 2 tiap 5 menit untuk cek model BEST baru
+5. Kalau model baru terdeteksi → reload otomatis (stop queries → download model → restart)
+
+> **Catatan restart:**
+> ```bash
+> pkill -f stream_processor
+> rm -rf checkpoint_dir_cassandra checkpoint_dir_history
+> uv run spark-consumer/stream_processor.py &
+> ```
+
+---
+
+## Verifikasi (dari Laptop 2)
 
 | Cek | Command / Cara |
 |---|---|
 | Data gempa masuk | `curl http://localhost:8000/api/recent?limit=5` |
 | Prediksi ada | `curl http://localhost:8000/api/accuracy` |
-| Dashboard muncul | Buka `http://localhost:5173` di browser |
-| Streaming berjalan | `tail -f spark-consumer/*.log` |
+| Dashboard muncul | Buka `http://localhost:5173` |
+| Streaming berjalan di L1 | `tail -f spark-consumer/*.log` (di Laptop 1) |
 | MinIO berisi model | Buka `http://localhost:9001` → bucket `ml-models` |
-| Model auto-reload | `tail -f spark-consumer/*.log` — muncul `"New BEST model detected"` |
+| Model auto-reload | Di log L1: `"New BEST model detected"` |
+| Kafka data aman | `docker exec kafka kafka-console-consumer --bootstrap-server localhost:9092 --topic earthquake_stream --from-beginning --max-messages 5` (di VPS) |
+
+---
 
 ## Troubleshooting
 
 | Masalah | Solusi |
 |---|---|
-| Spark crash / checkpoint error | `pkill -f stream_processor; rm -rf checkpoint_dir_*` lalu restart step 5 |
-| Cassandra timeout | `docker logs cassandra` — pastikan healthy (`docker ps`) |
-| Kafka tidak connect | `docker logs kafka` — cek error |
-| Kafka offset conflict | `pkill -f stream_processor; rm -rf checkpoint_dir_*` lalu restart |
-| API error saat startup | Pastikan Cassandra sudah up, seed & backfill step 3 sudah selesai |
-| Port sudah dipakai | Ubah di `.env` atau `docker/docker-compose.yml` |
-| Data tidak muncul di dashboard | Cek API langsung (`curl ...`). Jika API OK, refresh dashboard (F5) |
+| L1 gabung connect ke Kafka VPS | Pastikan `KAFKA_ADVERTISED_LISTENERS` di VPS pakai IP publik, firewall port 9092 terbuka |
+| L1 gabung connect ke Cassandra L2 | Pastikan `CASSANDRA_HOST=<IP_L2>`, firewall port 9042 terbuka |
+| L1 gabung connect ke MinIO L2 | Pastikan `MINIO_ENDPOINT=<IP_L2>:9000`, firewall port 9000 terbuka |
+| Spark crash / checkpoint error | `pkill -f stream_processor; rm -rf checkpoint_dir_*` lalu restart di L1 |
+| Cassandra timeout | `docker logs cassandra` di L2 — pastikan healthy |
+| Kafka offset conflict | `pkill -f stream_processor; rm -rf checkpoint_dir_*` lalu restart di L1 |
+| Data tidak muncul di dashboard | Cek API langsung (`curl ...`). Jika OK, refresh dashboard (F5) |
 | Producer "No new earthquakes" | Normal — USGS rilis data tiap 1-5 menit |
 | seed_and_backfill gagal | Pastikan CSV (`dataset_gempa_bigdata.csv`) ada di root, koneksi Cassandra lancar |
-| MinIO tidak reachable | `docker logs minio` — cek error. Pastikan healthy |
-| Streaming stuck di model lama | Cek MinIO console: bucket `ml-models` ada tag `BEST`? |
-| Bot mati | `pkill -f bot.py; uv run telegram-bot/bot.py &` |
-| Ingin re-init ulang | `pkill -f stream_processor; python3 -c "from cassandra.cluster import Cluster; c=Cluster(); s=c.connect(); s.execute('DROP KEYSPACE earthquake_db')"` lalu ulangi dari step 3 |
+| Streaming stuck di model lama | Cek MinIO console L2: bucket `ml-models` ada tag `BEST`? |
+| Kafka data hilang | Default retention 7 hari. Data aman selama L1 connect dalam 7 hari |
+
+---
 
 ## Port Summary
 
-| Port | Service |
-|---|---|
-| 2181 | Zookeeper |
-| 9092 | Kafka |
-| 9042 | Cassandra |
-| 9000 | MinIO S3 API |
-| 9001 | MinIO Console |
-| 8000 | FastAPI |
-| 5173 | Dashboard (Vite) |
+| Port | Service | Lokasi |
+|---|---|---|
+| 2181 | Zookeeper | VPS |
+| 9092 | Kafka | VPS |
+| 9042 | Cassandra | Laptop 2 |
+| 9000 | MinIO S3 API | Laptop 2 |
+| 9001 | MinIO Console | Laptop 2 |
+| 8000 | FastAPI | Laptop 2 |
+| 5173 | Dashboard (Vite) | Laptop 2 |

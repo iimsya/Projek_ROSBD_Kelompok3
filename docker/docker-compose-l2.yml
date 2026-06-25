@@ -1,0 +1,39 @@
+services:
+  cassandra:
+    image: cassandra:4.1
+    container_name: cassandra
+    ports:
+      - 9042:9042
+    environment:
+      - CASSANDRA_CLUSTER_NAME=EarthquakeCluster
+      - CASSANDRA_DC=datacenter1
+    volumes:
+      - cassandra_data:/var/lib/cassandra
+    healthcheck:
+      test: cqlsh -e "DESC KEYSPACES" cassandra 9042 || exit 1
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    ports:
+      - 9000:9000
+      - 9001:9001
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: curl -f http://localhost:9000/minio/health/live || exit 1
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  cassandra_data:
+  minio_data:
