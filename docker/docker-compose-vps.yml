@@ -53,7 +53,8 @@ services:
     working_dir: /app
     environment:
       KAFKA_BROKER: kafka:29092
-    command: sh -c "pip install -q --quiet kafka-python requests 2>/dev/null && python producer/usgs_producer.py"
+      PYTHONUNBUFFERED: "1"
+    command: sh -c "pip install -q --quiet kafka-python requests 2>/dev/null && python -u producer/usgs_producer.py"
 
 volumes:
   zookeeper_data:
