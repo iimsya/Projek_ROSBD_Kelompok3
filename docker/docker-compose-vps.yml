@@ -41,6 +41,20 @@ services:
       retries: 10
       start_period: 30s
 
+  producer:
+    image: python:3.12-slim
+    container_name: usgs_producer
+    restart: always
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ..:/app
+    working_dir: /app
+    environment:
+      KAFKA_BROKER: kafka:29092
+    command: sh -c "pip install -q kafka-python requests && python producer/usgs_producer.py"
+
 volumes:
   zookeeper_data:
   zookeeper_log:
