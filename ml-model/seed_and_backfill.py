@@ -244,37 +244,83 @@ def predict_and_update(df_features: pd.DataFrame, minio_client=None):
     from pyspark.sql import SparkSession
     from pyspark.ml.regression import RandomForestRegressionModel
     from pyspark.ml.feature import VectorAssembler
+    import traceback
 
     model_dir = os.path.join(os.path.dirname(__file__), 'spark_rf_model')
 
+    # Debug: cek df_features
+    print(f"  [DEBUG] df_features shape: {df_features.shape}")
+    print(f"  [DEBUG] FEATURE_COLS: {FEATURE_COLS}")
+    missing = [c for c in FEATURE_COLS if c not in df_features.columns]
+    if missing:
+        print(f"  [ERROR] Missing columns in df_features: {missing}")
+    print(f"  [DEBUG] unique grids in df_features: {df_features['grid_id'].nunique()}")
+    print(f"  [DEBUG] total rows in df_features: {len(df_features)}")
+
     # Prioritaskan download dari MinIO (BEST) daripada model lokal
     if minio_client:
-        best_ver = get_best_version(minio_client)
-        if best_ver:
-            print(f"  Downloading BEST model ({best_ver}) from MinIO...")
-            download_model(minio_client, best_ver, model_dir)
+        try:
+            best_ver = get_best_version(minio_client)
+            print(f"  [DEBUG] BEST tag = {best_ver}")
+            if best_ver:
+                print(f"  Downloading BEST model ({best_ver}) from MinIO...")
+                download_model(minio_client, best_ver, model_dir)
+                print(f"  [DEBUG] Model directory exists after download: {os.path.exists(model_dir)}")
+        except Exception as e:
+            print(f"  [ERROR] MinIO download failed: {e}")
+            traceback.print_exc()
 
     if not os.path.exists(model_dir):
         print("  Model not found locally or in MinIO. Skipping prediction.")
         return
 
-    spark = SparkSession.builder \
-        .appName("SeedPredict") \
-        .config("spark.driver.host", "127.0.0.1") \
-        .config("spark.driver.bindAddress", "127.0.0.1") \
-        .getOrCreate()
-    spark.sparkContext.setLogLevel("WARN")
+    try:
+        spark = SparkSession.builder \
+            .appName("SeedPredict") \
+            .config("spark.driver.host", "127.0.0.1") \
+            .config("spark.driver.bindAddress", "127.0.0.1") \
+            .getOrCreate()
+        spark.sparkContext.setLogLevel("WARN")
+        print("  [DEBUG] Spark session created.")
+    except Exception as e:
+        print(f"  [ERROR] Spark session creation failed: {e}")
+        traceback.print_exc()
+        return
 
-    print("Loading model...")
-    rf_model = RandomForestRegressionModel.load(model_dir)
+    try:
+        print("Loading model...")
+        rf_model = RandomForestRegressionModel.load(model_dir)
+        print("  [DEBUG] Model loaded successfully.")
+    except Exception as e:
+        print(f"  [ERROR] Model loading failed: {e}")
+        traceback.print_exc()
+        spark.stop()
+        return
 
-    df_features[FEATURE_COLS] = df_features[FEATURE_COLS].fillna(0.0)
-    latest = df_features.groupby('grid_id').tail(1).reset_index(drop=True)
+    try:
+        df_features[FEATURE_COLS] = df_features[FEATURE_COLS].fillna(0.0)
+        latest = df_features.groupby('grid_id').tail(1).reset_index(drop=True)
+        print(f"  [DEBUG] Latest per grid: {len(latest)} rows")
 
-    df_spark = spark.createDataFrame(latest)
-    assembler = VectorAssembler(inputCols=FEATURE_COLS, outputCol="features")
-    df_assembled = assembler.transform(df_spark)
-    df_pred = rf_model.transform(df_assembled)
+        if len(latest) == 0:
+            print("  [WARN] No latest rows to predict. Skipping.")
+            spark.stop()
+            return
+
+        df_spark = spark.createDataFrame(latest)
+        print(f"  [DEBUG] Spark DataFrame created: {df_spark.count()} rows")
+
+        assembler = VectorAssembler(inputCols=FEATURE_COLS, outputCol="features")
+        df_assembled = assembler.transform(df_spark)
+        print("  [DEBUG] VectorAssembler applied.")
+
+        df_pred = rf_model.transform(df_assembled)
+        print("  [DEBUG] Prediction transform done.")
+    except Exception as e:
+        print(f"  [ERROR] Feature assembly or prediction failed: {e}")
+        traceback.print_exc()
+        spark.stop()
+        return
 
     print("Upserting predictions to latest_events...")
     upsert = cassandra_session.prepare("""
@@ -284,25 +330,38 @@ def predict_and_update(df_features: pd.DataFrame, minio_client=None):
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """)
 
-    predictions = df_pred.collect()
-    for row in predictions:
-        pred_days = round(float(row.prediction), 2)
-        if pred_days <= 1.0:
-            status = "HIGH"
-        elif pred_days <= 3.0:
-            status = "MEDIUM"
-        else:
-            status = "LOW"
+    try:
+        predictions = df_pred.collect()
+        print(f"  [DEBUG] Prediction results count: {len(predictions)}")
+    except Exception as e:
+        print(f"  [ERROR] Collecting predictions failed: {e}")
+        traceback.print_exc()
+        spark.stop()
+        return
 
-        cassandra_session.execute(upsert, (
-            row.grid_id, row.id, row.waktu, row.place,
-            float(row.magnitudo), float(row.longitude), float(row.latitude), float(row.kedalaman),
-            float(row.signifikansi), float(row.energy), int(row.is_small_eq),
-            pred_days, status
-        ))
+    inserted = 0
+    for row in predictions:
+        try:
+            pred_days = round(float(row.prediction), 2)
+            if pred_days <= 1.0:
+                status = "HIGH"
+            elif pred_days <= 3.0:
+                status = "MEDIUM"
+            else:
+                status = "LOW"
+
+            cassandra_session.execute(upsert, (
+                row.grid_id, row.id, row.waktu, row.place,
+                float(row.magnitudo), float(row.longitude), float(row.latitude), float(row.kedalaman),
+                float(row.signifikansi), float(row.energy), int(row.is_small_eq),
+                pred_days, status
+            ))
+            inserted += 1
+        except Exception as e:
+            print(f"  [ERROR] Failed to upsert row {row.grid_id}: {e}")
 
     spark.stop()
-    print(f"  Updated {len(predictions)} grids in latest_events.")
+    print(f"  Updated {inserted} grids in latest_events.")
 
 
 def main():
