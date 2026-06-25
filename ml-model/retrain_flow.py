@@ -3,13 +3,12 @@ Prefect Flow — Retrain otomatis tiap 24 jam.
 1. Bulk read dari Cassandra via spark-cassandra connector
 2. Feature engineering
 3. Train Random Forest
-4. Save model + update latest_features.json
-5. Predict all grids → overwrite latest_events
+4. Save model + upload ke MinIO
+5. Champion/challenger: bandingkan MAE dengan BEST
 """
 import os
 import sys
 import shutil
-import subprocess
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -17,6 +16,11 @@ from prefect import flow, task
 
 import config
 from features import compute_features, FEATURE_COLS
+from minio_utils import (
+    get_client, ensure_bucket, version_tag,
+    upload_model, upload_features, upload_metrics,
+    write_tag, read_metrics
+)
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), 'spark_rf_model')
 FEATURES_PATH = os.path.join(os.path.dirname(__file__), 'latest_features.json')
@@ -83,7 +87,7 @@ def train_model(spark, df_features):
     rf_model.write().overwrite().save(MODEL_PATH)
     print(f"  Model saved to {MODEL_PATH}")
 
-    return rf_model
+    return rf_model, {"mae": round(mae, 4), "rmse": round(rmse, 4), "r2": round(r2, 4)}
 
 
 @task(log_prints=True)
@@ -94,43 +98,33 @@ def save_latest_features(df_features):
 
 
 @task(log_prints=True)
-def predict_all(spark, rf_model, df_features):
-    from pyspark.ml.feature import VectorAssembler
+def upload_to_minio(metrics: dict, version: str):
+    client = get_client()
+    ensure_bucket(client)
+    upload_model(client, MODEL_PATH, version)
+    upload_features(client, FEATURES_PATH, version)
+    upload_metrics(client, metrics, version)
+    write_tag(client, "LATEST", version)
+    print(f"  LATEST = {version}")
+    return client
 
-    latest = df_features.groupby('grid_id').tail(1).reset_index(drop=True)
-    latest[FEATURE_COLS] = latest[FEATURE_COLS].fillna(0.0)
 
-    df_spark = spark.createDataFrame(latest)
-    assembler = VectorAssembler(inputCols=FEATURE_COLS, outputCol="features")
-    df_assembled = assembler.transform(df_spark)
-    df_pred = rf_model.transform(df_assembled)
+@task(log_prints=True)
+def champion_challenger(client, metrics: dict, version: str):
+    try:
+        best_tag = client.get_object(config.MINIO_BUCKET, "BEST")
+        best_version = best_tag.read().decode().strip()
+        best_tag.close()
 
-    df_pred = df_pred.select(
-        "grid_id", "time", "id", "place", "magnitude", "longitude", "latitude",
-        "depth", "signifikansi", "energy", "is_small_eq",
-        "prediction", "prediction"
-    ).withColumnRenamed("prediction", "prediction_days") \
-     .withColumnRenamed("time", "event_time")
-
-    df_pred.createOrReplaceTempView("preds")
-    df_final = spark.sql("""
-        SELECT grid_id, id, event_time as time, place, magnitude, longitude, latitude,
-               depth, signifikansi, energy, is_small_eq,
-               ROUND(prediction_days, 2) as prediction_days,
-               CASE WHEN prediction_days <= 1.0 THEN 'HIGH'
-                    WHEN prediction_days <= 3.0 THEN 'MEDIUM'
-                    ELSE 'LOW' END as status
-        FROM preds
-    """)
-
-    print("Overwriting latest_events in Cassandra...")
-    df_final.write \
-        .format("org.apache.spark.sql.cassandra") \
-        .option("keyspace", "earthquake_db") \
-        .option("table", "latest_events") \
-        .mode("overwrite") \
-        .save()
-    print("  latest_events updated.")
+        best_metrics = read_metrics(client, best_version)
+        if best_metrics and metrics["mae"] < best_metrics["mae"]:
+            write_tag(client, "BEST", version)
+            print(f"  ✅ Better MAE ({metrics['mae']:.4f} < {best_metrics['mae']:.4f}) → BEST = {version}")
+        else:
+            print(f"  ❌ Worse/equal MAE ({metrics['mae']:.4f} >= {best_metrics.get('mae', float('inf')):.4f}) → keeping BEST = {best_version}")
+    except:
+        write_tag(client, "BEST", version)
+        print(f"  First model → BEST = {version}")
 
 
 @flow(log_prints=True)
@@ -150,9 +144,12 @@ def retrain_flow():
 
     df_raw = read_cassandra(spark)
     df_features = feature_engineering(df_raw)
-    rf_model = train_model(spark, df_features)
+    rf_model, metrics = train_model(spark, df_features)
     save_latest_features(df_features)
-    predict_all(spark, rf_model, df_features)
+
+    version = version_tag()
+    client = upload_to_minio(metrics, version)
+    champion_challenger(client, metrics, version)
 
     spark.stop()
     print("Retrain complete.")

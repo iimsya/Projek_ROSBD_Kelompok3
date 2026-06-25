@@ -1,6 +1,5 @@
 import os
 import sys
-import signal
 import time
 
 os.environ['PYSPARK_PYTHON'] = sys.executable
@@ -24,6 +23,12 @@ KAFKA_TOPIC = "earthquake_stream"
 CASSANDRA_HOST = config.CASSANDRA_HOST
 CASSANDRA_PORT = str(config.CASSANDRA_PORT)
 
+MODEL_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../ml-model/spark_rf_model"))
+FEATURES_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../ml-model/latest_features.json"))
+CHECKPOINT_HISTORY = "checkpoint_dir_history"
+CHECKPOINT_PRED = "checkpoint_dir_cassandra"
+WATCH_INTERVAL = 300
+
 schema = StructType([
     StructField("id", StringType(), True),
     StructField("time", TimestampType(), True),
@@ -40,6 +45,7 @@ schema = StructType([
 ])
 
 from cassandra.cluster import Cluster
+
 
 def init_cassandra():
     print("Inisialisasi Cassandra Keyspace dan Table...")
@@ -89,10 +95,11 @@ def init_cassandra():
     except Exception as e:
         print(f"Gagal inisialisasi Cassandra: {e}")
 
+
 def create_spark_session():
     os.environ['SPARK_LOCAL_IP'] = '127.0.0.1'
     os.environ['PYSPARK_SUBMIT_ARGS'] = '--packages org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.2,com.datastax.spark:spark-cassandra-connector_2.13:3.5.0 pyspark-shell'
-    
+
     spark = SparkSession.builder \
         .appName("EarthquakeStreamProcessor") \
         .config("spark.driver.host", "127.0.0.1") \
@@ -101,52 +108,64 @@ def create_spark_session():
         .config("spark.cassandra.connection.host", CASSANDRA_HOST) \
         .config("spark.cassandra.connection.port", CASSANDRA_PORT) \
         .getOrCreate()
-    
+
     spark.sparkContext.setLogLevel("WARN")
     return spark
 
-def process_stream():
-    init_cassandra()
-    
-    spark = create_spark_session()
-    print("Spark Session created successfully.")
 
-    # 1. Load ML Model & Historical Features
-    model_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../ml-model/spark_rf_model"))
-    features_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../ml-model/latest_features.json"))
-    
-    print("Loading PySpark ML Model...")
+def get_best_version_from_minio(client=None):
+    try:
+        if client is None:
+            from minio_utils import get_client
+            client = get_client()
+        best_tag = client.get_object(config.MINIO_BUCKET, "BEST")
+        version = best_tag.read().decode().strip()
+        best_tag.close()
+        return version
+    except:
+        return None
+
+
+def download_best_model(client, version: str):
+    from minio_utils import download_model, download_features
+    download_model(client, version, MODEL_PATH)
+    download_features(client, version, FEATURES_PATH)
+
+
+def load_model_and_features(spark, model_path, features_path):
+    print(f"  Loading model from {model_path}...")
     rf_model = RandomForestRegressionModel.load(model_path)
-    
-    print("Loading Historical Features...")
-    df_static_pd = pd.read_json(features_path)
-    df_static_spark = spark.createDataFrame(df_static_pd)
-    
-    # We only need the historical aggregation columns
-    df_history = df_static_spark.select(
-        "grid_id", 
+    print(f"  Loading features from {features_path}...")
+    df_pd = pd.read_json(features_path)
+    df = spark.createDataFrame(df_pd)
+    df_history = df.select(
+        "grid_id",
         "energy_accum_7d", "energy_accum_30d", "energy_accum_90d", "small_eq_freq_30d"
     )
+    return rf_model, df_history
 
-    # 2. Read from Kafka
-    df_kafka = spark \
-        .readStream \
+
+def start_queries(spark, rf_model, df_history):
+    feature_cols = ['latitude', 'longitude', 'kedalaman', 'magnitudo',
+                    'energy_accum_7d', 'energy_accum_30d', 'energy_accum_90d',
+                    'small_eq_freq_30d', 'signifikansi']
+
+    df_kafka = spark.readStream \
         .format("kafka") \
         .option("kafka.bootstrap.servers", KAFKA_BROKER) \
         .option("subscribe", KAFKA_TOPIC) \
         .option("startingOffsets", "latest") \
+        .option("failOnDataLoss", "false") \
         .load()
 
     df_parsed = df_kafka.selectExpr("CAST(value AS STRING) as json_str") \
         .select(from_json(col("json_str"), schema).alias("data")) \
         .select("data.*")
 
-    # 3. Clean Data & Handle Missing Values
     df_cleaned = df_parsed \
         .fillna({"mmi": 0.0, "peringatan": "none", "potensi_tsunami": "0", "signifikansi": 0.0}) \
         .filter(col("magnitude").isNotNull() & col("latitude").isNotNull() & col("longitude").isNotNull())
 
-    # 4. Feature Engineering
     df_realtime = df_cleaned \
         .withColumn("grid_lat", round(col("latitude"), 0)) \
         .withColumn("grid_lon", round(col("longitude"), 0)) \
@@ -154,7 +173,6 @@ def process_stream():
         .withColumn("energy", expr("pow(10, 4.8 + 1.5 * magnitude)")) \
         .withColumn("is_small_eq", expr("CASE WHEN magnitude < 4.5 THEN 1 ELSE 0 END"))
 
-    # 5. Static-Streaming Join
     df_joined = df_realtime.join(df_history, "grid_id", "left") \
         .fillna({
             "energy_accum_7d": 0.0,
@@ -163,31 +181,23 @@ def process_stream():
             "small_eq_freq_30d": 0.0
         })
 
-    # 6. ML Prediction
-    feature_cols = ['latitude', 'longitude', 'kedalaman', 'magnitudo', 
-                    'energy_accum_7d', 'energy_accum_30d', 'energy_accum_90d', 
-                    'small_eq_freq_30d', 'signifikansi']
-                    
     df_for_ml = df_joined \
         .withColumn("kedalaman", col("depth")) \
         .withColumn("magnitudo", col("magnitude"))
 
     assembler = VectorAssembler(inputCols=feature_cols, outputCol="features")
     df_assembled = assembler.transform(df_for_ml)
-    
     df_pred = rf_model.transform(df_assembled)
-    
-    # 7. Format Result
+
     df_final = df_pred \
         .withColumn("prediction_days", round(col("prediction"), 2)) \
-        .withColumn("status", 
+        .withColumn("status",
             when(col("prediction") <= 1.0, "HIGH")
             .when(col("prediction") <= 3.0, "MEDIUM")
             .otherwise("LOW")
         )
 
-    # 8a. Write raw events to earthquake_history (for map /api/recent)
-    query_history = df_realtime.select(
+    q_history = df_realtime.select(
         "grid_id", "id", "time", "place", "magnitude", "longitude",
         "latitude", "depth", "signifikansi", "energy", "is_small_eq"
     ).writeStream \
@@ -195,25 +205,69 @@ def process_stream():
         .format("org.apache.spark.sql.cassandra") \
         .option("keyspace", "earthquake_db") \
         .option("table", "earthquake_history") \
-        .option("checkpointLocation", "checkpoint_dir_history") \
+        .option("checkpointLocation", CHECKPOINT_HISTORY) \
         .start()
 
-    # 8b. Write predictions to latest_events
-    query_pred = df_final.select(
-        "grid_id", "id", "time", "place", "magnitude", "longitude", 
+    q_pred = df_final.select(
+        "grid_id", "id", "time", "place", "magnitude", "longitude",
         "latitude", "depth", "signifikansi", "energy", "is_small_eq",
         "prediction_days", "status"
-    ) \
-        .writeStream \
+    ).writeStream \
         .outputMode("append") \
         .format("org.apache.spark.sql.cassandra") \
         .option("keyspace", "earthquake_db") \
         .option("table", "latest_events") \
-        .option("checkpointLocation", "checkpoint_dir_cassandra") \
+        .option("checkpointLocation", CHECKPOINT_PRED) \
         .start()
 
-    print("Started Spark Streaming: raw → earthquake_history, predictions → latest_events")
-    spark.streams.awaitAnyTermination()
+    return q_history, q_pred
+
+
+def process_stream():
+    init_cassandra()
+    spark = create_spark_session()
+
+    client = None
+    try:
+        from minio_utils import get_client
+        client = get_client()
+    except Exception as e:
+        print(f"MinIO not available, using local model: {e}")
+
+    # Initial load — coba dari MinIO BEST, fallback ke local
+    best_version = get_best_version_from_minio(client) if client else None
+    if best_version and client:
+        print(f"Downloading BEST model from MinIO: {best_version}")
+        download_best_model(client, best_version)
+    else:
+        print("Using local model files")
+
+    rf_model, df_history = load_model_and_features(spark, MODEL_PATH, FEATURES_PATH)
+    q1, q2 = start_queries(spark, rf_model, df_history)
+    print(f"Started Spark Streaming: raw → earthquake_history, predictions → latest_events")
+
+    last_best = best_version or "local"
+    while True:
+        time.sleep(WATCH_INTERVAL)
+        if not client:
+            continue
+
+        current_best = get_best_version_from_minio(client)
+        if current_best and current_best != last_best:
+            print(f"New BEST model detected: {current_best} (was {last_best})")
+            print("Stopping queries...")
+            q1.stop()
+            q2.stop()
+            q1.awaitTermination()
+            q2.awaitTermination()
+            print("Queries stopped.")
+
+            download_best_model(client, current_best)
+            rf_model, df_history = load_model_and_features(spark, MODEL_PATH, FEATURES_PATH)
+            q1, q2 = start_queries(spark, rf_model, df_history)
+            last_best = current_best
+            print(f"Queries restarted with BEST = {current_best}")
+
 
 if __name__ == "__main__":
     process_stream()
