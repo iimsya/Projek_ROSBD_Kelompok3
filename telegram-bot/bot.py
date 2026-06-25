@@ -37,13 +37,36 @@ def get_active_grids():
 alert_history = {}
 ALERT_COOLDOWN_SECONDS = 3600 # 1 jam cooldown untuk grid yang sama
 
+def is_verifiable(grid_id: str, event_time: datetime) -> bool:
+    """Cek apakah grid punya event lain dalam ≤3 hari dari event_time."""
+    if not cassandra_session:
+        return True
+    try:
+        if event_time.tzinfo is None:
+            event_time = event_time.replace(tzinfo=timezone.utc)
+        rows = cassandra_session.execute(
+            "SELECT time FROM earthquake_db.earthquake_history "
+            "WHERE grid_id = %s LIMIT 200",
+            (grid_id,)
+        )
+        for r in rows:
+            t = r.time
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=timezone.utc)
+            if abs((t - event_time).total_seconds()) < 60:
+                continue
+            if abs((t - event_time).total_seconds() / 86400) <= 3:
+                return True
+        return False
+    except:
+        return False
+
+
 def format_countdown(event_time_str, prediction_days):
     if not event_time_str:
         return "Tidak diketahui"
         
     try:
-        # parse ISO format string
-        # Cassandra usually stores UTC. We append UTC info if it lacks one
         event_time = datetime.fromisoformat(event_time_str)
         if event_time.tzinfo is None:
             event_time = event_time.replace(tzinfo=timezone.utc)
@@ -68,13 +91,16 @@ def format_countdown(event_time_str, prediction_days):
         print(f"Error parsing date: {e}")
         return f"{prediction_days} hari lagi"
 
+
 def monitor_all_grids():
     """
-    Melakukan polling ke FastAPI untuk mengecek status semua grid dari Cassandra secara berkala.
+    Melakukan polling ke FastAPI untuk mengecek status semua grid secara berkala.
+    Hanya memonitor prediksi yang masih active (belum expired) dan verifiable.
     """
     grids = get_active_grids()
     print(f"[{time.strftime('%X')}] Memonitor {len(grids)} area (grid)...")
     
+    now = datetime.now(timezone.utc)
     current_time = time.time()
     all_high_alerts = []
     has_new_alert = False
@@ -85,27 +111,36 @@ def monitor_all_grids():
             if response.status_code == 200:
                 data = response.json()
                 
-                # Cek Kondisi Bahaya (Prediksi <= 1 hari atau HIGH)
-                if data["prediction"] <= 1.0 or data["status"] == "HIGH":
-                    countdown_str = format_countdown(data.get("event_time", ""), data["prediction"])
-                    place = data.get("place", "Lokasi tidak diketahui")
-                    magnitude = data.get("magnitude", 0.0)
-                    
-                    alert_text = f"📍 *Lokasi*: {place} (Grid: {str(grid_id).replace('_', '\\_')} | *Telah terjadi gempa dengan Magnitudo {magnitude:.1f}*)\n"
-                    alert_text += f"⏳ *Countdown Susulan*: {countdown_str}"
-                    
-                    # Kumpulkan semua alert beserta nilai prediksinya untuk disorting nanti
-                    all_high_alerts.append((grid_id, alert_text, data["prediction"]))
-                    
-                    # Cek apakah ini alert baru (waktu cooldown sudah habis)
-                    last_alert = alert_history.get(grid_id, 0)
-                    if current_time - last_alert > ALERT_COOLDOWN_SECONDS:
-                        has_new_alert = True
-                else:
-                    pass
-            else:
-                pass
+                # Skip jika prediksi tidak diketahui
+                if data.get("status") == "UNKNOWN" or data["prediction"] == 99.99:
+                    continue
                 
+                # Filter: hanya aktif (belum expired)
+                event_time = datetime.fromisoformat(data.get("event_time", ""))
+                if event_time.tzinfo is None:
+                    event_time = event_time.replace(tzinfo=timezone.utc)
+                deadline = event_time + timedelta(days=data["prediction"])
+                if now >= deadline:
+                    continue
+                
+                # Filter: hanya verifiable (ada event lain dalam 3 hari)
+                if not is_verifiable(grid_id, event_time):
+                    continue
+                
+                countdown_str = format_countdown(data.get("event_time", ""), data["prediction"])
+                place = data.get("place", "Lokasi tidak diketahui")
+                magnitude = data.get("magnitude", 0.0)
+                
+                alert_text = f"📍 *Lokasi*: {place} (Grid: {str(grid_id).replace('_', '\\_')} | *Telah terjadi gempa dengan Magnitudo {magnitude:.1f}*)\n"
+                alert_text += f"⏳ *Countdown Susulan*: {countdown_str}"
+                
+                all_high_alerts.append((grid_id, alert_text, data["prediction"]))
+                
+                # Cek apakah ini alert baru (waktu cooldown sudah habis)
+                last_alert = alert_history.get(grid_id, 0)
+                if current_time - last_alert > ALERT_COOLDOWN_SECONDS:
+                    has_new_alert = True
+                    
         except requests.exceptions.ConnectionError:
             print("API is not reachable. Is FastAPI running?")
             break
