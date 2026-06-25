@@ -19,6 +19,7 @@ RUN pip install --no-cache-dir pyspark==3.5.0 pandas cassandra-driver
 # Copy the consumer code, ml-model, and other required assets
 COPY spark-consumer/ /app/spark-consumer/
 COPY ml-model/ /app/ml-model/
+COPY config.py /app/
 
 # Set working directory to the spark-consumer folder
 WORKDIR /app/spark-consumer
