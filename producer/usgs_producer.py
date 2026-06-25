@@ -2,8 +2,9 @@ import json
 import os
 import time
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from kafka import KafkaProducer
+from kafka.errors import KafkaError
 
 # Configuration
 KAFKA_BROKER = os.getenv("KAFKA_BROKER", "localhost:9092")
@@ -27,7 +28,7 @@ sent_ids = set()
 
 def fetch_and_send():
     # Fetch data from the last 2 hours to ensure we don't miss anything due to API delays
-    end_time = datetime.utcnow()
+    end_time = datetime.now(timezone.utc)
     start_time = end_time - timedelta(hours=2)
     
     params = {
@@ -38,7 +39,7 @@ def fetch_and_send():
     }
     
     try:
-        response = requests.get(USGS_URL, params=params)
+        response = requests.get(USGS_URL, params=params, timeout=30)
         if response.status_code == 200:
             data = response.json()
             features = data.get('features', [])
@@ -50,8 +51,7 @@ def fetch_and_send():
                     prop = feature['properties']
                     geom = feature['geometry']['coordinates']
                     
-                    # Convert ms timestamp to ISO format string
-                    eq_time = datetime.utcfromtimestamp(prop['time'] / 1000.0).isoformat()
+                    eq_time = datetime.fromtimestamp(prop['time'] / 1000.0, tz=timezone.utc).isoformat()
                     
                     payload = {
                         "id": eq_id,
@@ -69,7 +69,7 @@ def fetch_and_send():
                     }
                     
                     # Send to Kafka
-                    producer.send(KAFKA_TOPIC, value=payload)
+                    producer.send(KAFKA_TOPIC, value=payload).get(timeout=10)
                     sent_ids.add(eq_id)
                     new_events_count += 1
                     
