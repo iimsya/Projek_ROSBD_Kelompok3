@@ -16,14 +16,6 @@
 **a. Setup `.env`**
 ```env
 KAFKA_BROKER=localhost:9092
-CASSANDRA_HOST=100.68.78.82
-MINIO_ENDPOINT=100.68.78.82:9000
-MINIO_ACCESS_KEY=minioadmin
-MINIO_SECRET_KEY=minioadmin
-MINIO_BUCKET=ml-models
-MODEL_PATH=ml-model/spark_rf_model
-FEATURES_PATH=ml-model/latest_features.json
-CSV_PATH=dataset_gempa_bigdata.csv
 ```
 
 **b. Jalankan Kafka + Zookeeper**
@@ -98,9 +90,20 @@ uv run ml-model/retrain_flow.py
 Verifikasi MinIO: buka `http://localhost:9001` (login: `minioadmin`/`minioadmin`), cek bucket `ml-models` ada, ada folder `v_*/` dengan model + features.
 
 **d. Seed data & backfill (download model dari MinIO, predict, insert)**
+
+⚠️ **Step c (train + retrain) WAJIB jalan duluan** — `seed_and_backfill.py` butuh model di MinIO (tag BEST).
+
 ```bash
 uv run ml-model/seed_and_backfill.py
 ```
+
+Verifikasi:
+```bash
+docker exec -it cassandra cqlsh -e "SELECT count(*) FROM earthquake_db.latest_events;"
+docker exec -it cassandra cqlsh -e "SELECT count(*) FROM earthquake_db.earthquake_history;"
+```
+
+> **Catatan:** `seed_and_backfill.py` idempotent — kalau data CSV udah ada di Cassandra, dia skip bulk insert. Kalau USGS data masih <1 jam, skip backfill. Aman di-run berkali-kali.
 
 **e. Jalankan FastAPI**
 ```bash
@@ -224,9 +227,9 @@ docker exec -it cassandra cqlsh -e "SELECT count(*) FROM earthquake_db.latest_ev
 
   2️⃣ Laptop 2  docker compose -f docker-compose-l2.yml up -d
               ↓ (tunggu 30 detik sampai Cassandra ready)
-              train.py + retrain_flow.py   (upload model ke MinIO)
+              train.py + retrain_flow.py   ⚠️ WAJIB — upload model ke MinIO + tag BEST
               ↓
-              seed_and_backfill.py          (download model dari MinIO)
+              seed_and_backfill.py          ⚠️ WAJIB — download BEST → predict → latest_events
               ↓
               FastAPI (api/main.py)
               ↓
@@ -269,4 +272,5 @@ docker exec -it cassandra cqlsh -e "SELECT count(*) FROM earthquake_db.latest_ev
 | `No module named 'pyspark'` | `uv sync` dulu, pastikan pyspark di pyproject.toml |
 | Cassandra write slow | Cek network latency L1 → L2 via Tailscale |
 | Model not found | `retrain_flow.py` atau `train.py` harus jalan minimal sekali di L2 (upload model ke MinIO) |
+| `latest_events` masih 0 setelah seed | Cek tag BEST: `uv run python -c "from minio_utils import get_client, get_best_version; mc = get_client(); print('BEST =', get_best_version(mc))"` — kalau None, jalanin `retrain_flow.py` dulu |
 | Features not found | `retrain_flow.py` atau `seed_and_backfill.py` harus jalan minimal sekali (upload features ke MinIO) |

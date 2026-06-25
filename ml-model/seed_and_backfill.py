@@ -125,6 +125,11 @@ def bulk_insert_history(df: pd.DataFrame):
     print(f"  Done. {total} rows inserted.")
 
 
+def get_history_count() -> int:
+    row = cassandra_session.execute("SELECT count(*) FROM earthquake_db.earthquake_history").one()
+    return row[0] if row else 0
+
+
 def get_last_timestamp() -> datetime | None:
     row = cassandra_session.execute(
         "SELECT MAX(time) as max_ts FROM earthquake_db.earthquake_history"
@@ -136,6 +141,9 @@ def backfill_usgs(last_ts: datetime):
     now = datetime.now(timezone.utc)
     if last_ts and last_ts.tzinfo is None:
         last_ts = last_ts.replace(tzinfo=timezone.utc)
+    if last_ts and (now - last_ts).total_seconds() < 3600:
+        print("  Backfill skipped — data up to date (<1h old).")
+        return
     if last_ts and last_ts >= now:
         print("No gap to backfill (last_ts >= now).")
         return
@@ -312,7 +320,11 @@ def main():
     csv_path = os.path.join(os.path.dirname(__file__), '..', config.CSV_PATH)
     if os.path.exists(csv_path):
         df_csv = read_csv(csv_path)
-        bulk_insert_history(df_csv)
+        existing = get_history_count()
+        if existing > 0 and existing >= len(df_csv) * 0.9:
+            print(f"  Data already exists ({existing} rows), skipping CSV bulk insert.")
+        else:
+            bulk_insert_history(df_csv)
     else:
         print(f"CSV not found at {csv_path}, skipping bulk insert.")
 
