@@ -274,7 +274,7 @@ def catchup_from_usgs(spark, rf_model, df_history):
     for f in features:
         prop = f['properties']
         geom = f['geometry']['coordinates']
-        ts = datetime.utcfromtimestamp(prop['time'] / 1000.0)
+        ts = datetime.fromtimestamp(prop['time'] / 1000.0, tz=timezone.utc)
         lat, lon = geom[1], geom[0]
         grid_lat = np.floor(lat / 1.0) * 1.0
         grid_lon = np.floor(lon / 1.0) * 1.0
@@ -324,7 +324,7 @@ def catchup_from_usgs(spark, rf_model, df_history):
 
     inserted = 0
     for row in predictions:
-        pred_days = round(float(row.prediction), 2)
+        pred_days = float(f"{row.prediction:.2f}")
         if pred_days <= 1.0:
             status = "HIGH"
         elif pred_days <= 3.0:
