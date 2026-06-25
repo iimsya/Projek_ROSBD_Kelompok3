@@ -156,6 +156,7 @@ def retrain_flow():
 
 
 if __name__ == "__main__":
+    retrain_flow()
     retrain_flow.serve(
         name="daily_retrain",
         cron="0 3 * * *"
