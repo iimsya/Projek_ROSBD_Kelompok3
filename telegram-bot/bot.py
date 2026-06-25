@@ -4,16 +4,18 @@ from datetime import datetime, timedelta, timezone
 import requests
 from cassandra.cluster import Cluster
 
+import config
+
 # Konfigurasi Telegram
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8924410551:AAGeCnOpBJH4IAuuqoJiNPXR-N-bmh7vZqk")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "-5189248843")
 
 # Endpoint FastAPI
-API_URL = "http://localhost:8000/api/prediction"
+API_URL = f"http://{config.API_HOST}:{config.API_PORT}/api/prediction"
 
 # Setup Cassandra Connection
 try:
-    cluster = Cluster(['localhost'], port=9042)
+    cluster = Cluster([config.CASSANDRA_HOST], port=config.CASSANDRA_PORT)
     cassandra_session = cluster.connect()
     print("Bot berhasil terhubung ke Cassandra!")
 except Exception as e:

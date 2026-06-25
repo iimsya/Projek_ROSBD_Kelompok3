@@ -3,3 +3,5 @@ __pycache__/
 *.csv
 .env
 .ipynb_checkpoints/
+checkpoint_dir*/
+ml-model/spark_rf_model/

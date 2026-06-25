@@ -1,16 +1,8 @@
 import os
-import glob
 import sys
+import signal
+import time
 
-# Konfigurasi otomatis Environment Variables untuk Java 17 dan Hadoop Winutils
-java_dirs = glob.glob(r"C:\Program Files\Microsoft\jdk-17*")
-if java_dirs:
-    os.environ["JAVA_HOME"] = java_dirs[0]
-
-os.environ["HADOOP_HOME"] = r"D:\hadoop"
-os.environ["PATH"] = os.environ["HADOOP_HOME"] + r"\bin;" + os.environ.get("PATH", "")
-
-# Untuk Spark di Windows
 os.environ['PYSPARK_PYTHON'] = sys.executable
 os.environ['PYSPARK_DRIVER_PYTHON'] = sys.executable
 
@@ -25,11 +17,12 @@ from pyspark.ml.regression import RandomForestRegressionModel
 from pyspark.ml.feature import VectorAssembler
 import pandas as pd
 
-# Configuration
-KAFKA_BROKER = "localhost:9092"
+import config
+
+KAFKA_BROKER = config.KAFKA_BROKER
 KAFKA_TOPIC = "earthquake_stream"
-CASSANDRA_HOST = "localhost"
-CASSANDRA_PORT = "9042"
+CASSANDRA_HOST = config.CASSANDRA_HOST
+CASSANDRA_PORT = str(config.CASSANDRA_PORT)
 
 schema = StructType([
     StructField("id", StringType(), True),
@@ -56,6 +49,22 @@ def init_cassandra():
         session.execute("""
         CREATE KEYSPACE IF NOT EXISTS earthquake_db
         WITH REPLICATION = { 'class' : 'SimpleStrategy', 'replication_factor' : 1 }
+        """)
+        session.execute("""
+        CREATE TABLE IF NOT EXISTS earthquake_db.earthquake_history (
+            grid_id text,
+            time timestamp,
+            id text,
+            place text,
+            magnitude double,
+            longitude double,
+            latitude double,
+            depth double,
+            signifikansi double,
+            energy double,
+            is_small_eq int,
+            PRIMARY KEY ((grid_id), time, id)
+        ) WITH CLUSTERING ORDER BY (time DESC, id ASC)
         """)
         session.execute("""
         CREATE TABLE IF NOT EXISTS earthquake_db.latest_events (
@@ -177,8 +186,20 @@ def process_stream():
             .otherwise("LOW")
         )
 
-    # 8. Output to Cassandra
-    query = df_final.select(
+    # 8a. Write raw events to earthquake_history (for map /api/recent)
+    query_history = df_realtime.select(
+        "grid_id", "id", "time", "place", "magnitude", "longitude",
+        "latitude", "depth", "signifikansi", "energy", "is_small_eq"
+    ).writeStream \
+        .outputMode("append") \
+        .format("org.apache.spark.sql.cassandra") \
+        .option("keyspace", "earthquake_db") \
+        .option("table", "earthquake_history") \
+        .option("checkpointLocation", "checkpoint_dir_history") \
+        .start()
+
+    # 8b. Write predictions to latest_events
+    query_pred = df_final.select(
         "grid_id", "id", "time", "place", "magnitude", "longitude", 
         "latitude", "depth", "signifikansi", "energy", "is_small_eq",
         "prediction_days", "status"
@@ -191,8 +212,8 @@ def process_stream():
         .option("checkpointLocation", "checkpoint_dir_cassandra") \
         .start()
 
-    print("Started Spark Streaming with MLlib Prediction. Writing to Cassandra...")
-    query.awaitTermination()
+    print("Started Spark Streaming: raw → earthquake_history, predictions → latest_events")
+    spark.streams.awaitAnyTermination()
 
 if __name__ == "__main__":
     process_stream()

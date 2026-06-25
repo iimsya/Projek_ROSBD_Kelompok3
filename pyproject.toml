@@ -1,0 +1,18 @@
+[project]
+name = "projek-rosbd-kelompok3"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "cassandra-driver>=3.30.0",
+    "fastapi>=0.138.0",
+    "kafka-python>=3.0.4",
+    "numpy>=2.5.0",
+    "pandas>=3.0.3",
+    "prefect>=3.7.5",
+    "pyspark>=4.1.2",
+    "python-dotenv>=1.2.2",
+    "requests>=2.34.2",
+    "uvicorn>=0.49.0",
+]

@@ -1,0 +1,10 @@
+kafka-python
+cassandra-driver
+pyspark
+prefect
+python-dotenv
+uvicorn
+fastapi
+requests
+pandas
+numpy
