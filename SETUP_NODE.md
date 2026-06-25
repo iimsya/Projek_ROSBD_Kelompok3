@@ -89,17 +89,17 @@ docker compose -f docker-compose-l2.yml up -d
 
 Tunggu ~30 detik agar Cassandra siap.
 
-**c. Seed data & init MinIO bucket**
-```bash
-uv run ml-model/seed_and_backfill.py
-```
-
-Verifikasi MinIO: buka `http://localhost:9001` (login: `minioadmin`/`minioadmin`), cek bucket `ml-models` sudah ada.
-
-**d. Train model awal & upload ke MinIO**
+**c. Train model awal & upload ke MinIO**
 ```bash
 uv run ml-model/train.py
 uv run ml-model/retrain_flow.py
+```
+
+Verifikasi MinIO: buka `http://localhost:9001` (login: `minioadmin`/`minioadmin`), cek bucket `ml-models` ada, ada folder `v_*/` dengan model + features.
+
+**d. Seed data & backfill (download model dari MinIO, predict, insert)**
+```bash
+uv run ml-model/seed_and_backfill.py
 ```
 
 **e. Jalankan FastAPI**
@@ -138,7 +138,7 @@ Tambahkan (retrain tiap 6 jam):
 ### Health Check
 ```bash
 # Cassandra
-docker exec -it cassandra cqlsh -e "SELECT count(*) FROM eq_data.latest_events;"
+docker exec -it cassandra cqlsh -e "SELECT count(*) FROM earthquake_db.latest_events;"
 
 # MinIO Console
 curl http://localhost:9001
@@ -148,10 +148,10 @@ curl http://localhost:8000/health
 
 # MinIO objects
 uv run python -c "
-from ml_model.minio_utils import MinIOClient
-mc = MinIOClient()
-print('Buckets:', mc.client.list_buckets())
-objects = list(mc.client.list_objects('ml-models', recursive=True))
+from minio_utils import get_client
+mc = get_client()
+print('Buckets:', mc.list_buckets())
+objects = list(mc.list_objects('ml-models', recursive=True))
 for o in objects:
     print(f'  {o.object_name}  ({o.size} bytes)')
 "
@@ -210,7 +210,7 @@ tail -F spark_stream_output.log
 # Harusnya ada: "writeBatch to Cassandra: 1 rows" tiap menit
 
 # Verifikasi data masuk ke Cassandra (dari L2)
-docker exec -it cassandra cqlsh -e "SELECT count(*) FROM eq_data.latest_events;"
+docker exec -it cassandra cqlsh -e "SELECT count(*) FROM earthquake_db.latest_events;"
 ```
 
 ---
@@ -222,11 +222,11 @@ docker exec -it cassandra cqlsh -e "SELECT count(*) FROM eq_data.latest_events;"
               ↓ (tunggu 15 detik)
               usgs_producer.py
 
- 2️⃣ Laptop 2  docker compose -f docker-compose-l2.yml up -d
+  2️⃣ Laptop 2  docker compose -f docker-compose-l2.yml up -d
               ↓ (tunggu 30 detik sampai Cassandra ready)
-              seed_and_backfill.py
+              train.py + retrain_flow.py   (upload model ke MinIO)
               ↓
-              train.py + retrain_flow.py   (opsional, bisa langsung)
+              seed_and_backfill.py          (download model dari MinIO)
               ↓
               FastAPI (api/main.py)
               ↓
@@ -260,7 +260,7 @@ docker exec -it cassandra cqlsh -e "SELECT count(*) FROM eq_data.latest_events;"
 ### MinIO (L2)
 | Gejala | Solusi |
 |---|---|
-| `AccessDenied` bucket | `seed_and_backfill.py` harus jalan dulu |
+| `AccessDenied` bucket | `retrain_flow.py` atau `seed_and_backfill.py` harus jalan duluan (via `ensure_bucket()`) |
 | L1 can't reach MinIO | Cek Tailscale: `ping 100.68.78.82` dari L1 |
 
 ### Streaming (L1)
@@ -268,4 +268,5 @@ docker exec -it cassandra cqlsh -e "SELECT count(*) FROM eq_data.latest_events;"
 |---|---|
 | `No module named 'pyspark'` | `uv sync` dulu, pastikan pyspark di pyproject.toml |
 | Cassandra write slow | Cek network latency L1 → L2 via Tailscale |
-| Model not found | `retrain_flow.py` harus jalan minimal sekali di L2 |
+| Model not found | `retrain_flow.py` atau `train.py` harus jalan minimal sekali di L2 (upload model ke MinIO) |
+| Features not found | `retrain_flow.py` atau `seed_and_backfill.py` harus jalan minimal sekali (upload features ke MinIO) |

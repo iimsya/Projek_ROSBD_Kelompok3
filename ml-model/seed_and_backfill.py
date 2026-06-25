@@ -20,6 +20,10 @@ from cassandra import ConsistencyLevel as CL
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import config
 from features import compute_features, FEATURE_COLS, assign_grid
+from minio_utils import (
+    get_client, ensure_bucket, version_tag,
+    download_model, upload_features, get_best_version
+)
 
 USGS_URL = "https://earthquake.usgs.gov/fdsnws/event/1/query"
 BATCH_SIZE = 100
@@ -218,22 +222,32 @@ def read_all_history() -> pd.DataFrame:
     return df
 
 
-def save_latest_features(df_features: pd.DataFrame):
+def save_latest_features(df_features: pd.DataFrame, minio_client=None, version=None):
     path = os.path.join(os.path.dirname(__file__), 'latest_features.json')
     latest = df_features.groupby('grid_id').tail(1).copy()
     latest.to_json(path, orient='records')
     print(f"  latest_features.json saved ({len(latest)} grids).")
 
+    if minio_client and version:
+        upload_features(minio_client, path, version)
 
-def predict_and_update(df_features: pd.DataFrame):
+
+def predict_and_update(df_features: pd.DataFrame, minio_client=None):
     from pyspark.sql import SparkSession
     from pyspark.ml.regression import RandomForestRegressionModel
     from pyspark.ml.feature import VectorAssembler
 
-    model_path = os.path.join(os.path.dirname(__file__), 'spark_rf_model')
+    model_dir = os.path.join(os.path.dirname(__file__), 'spark_rf_model')
 
-    if not os.path.exists(model_path):
-        print("  Model not found. Skipping prediction.")
+    # Prioritaskan download dari MinIO (BEST) daripada model lokal
+    if minio_client:
+        best_ver = get_best_version(minio_client)
+        if best_ver:
+            print(f"  Downloading BEST model ({best_ver}) from MinIO...")
+            download_model(minio_client, best_ver, model_dir)
+
+    if not os.path.exists(model_dir):
+        print("  Model not found locally or in MinIO. Skipping prediction.")
         return
 
     spark = SparkSession.builder \
@@ -244,7 +258,7 @@ def predict_and_update(df_features: pd.DataFrame):
     spark.sparkContext.setLogLevel("WARN")
 
     print("Loading model...")
-    rf_model = RandomForestRegressionModel.load(model_path)
+    rf_model = RandomForestRegressionModel.load(model_dir)
 
     df_features[FEATURE_COLS] = df_features[FEATURE_COLS].fillna(0.0)
     latest = df_features.groupby('grid_id').tail(1).reset_index(drop=True)
@@ -287,6 +301,14 @@ def main():
     connect()
     create_schema()
 
+    minio_client = None
+    try:
+        minio_client = get_client()
+        ensure_bucket(minio_client)
+        print("MinIO connected.")
+    except Exception as e:
+        print(f"MinIO not available ({e}), continuing without MinIO.")
+
     csv_path = os.path.join(os.path.dirname(__file__), '..', config.CSV_PATH)
     if os.path.exists(csv_path):
         df_csv = read_csv(csv_path)
@@ -309,9 +331,10 @@ def main():
 
     print("Computing features...")
     df_features = compute_features(df_history, compute_target=False)
-    save_latest_features(df_features)
+    seed_version = version_tag()
+    save_latest_features(df_features, minio_client, seed_version)
 
-    predict_and_update(df_features)
+    predict_and_update(df_features, minio_client)
 
     print("\n=== Seed & Backfill Complete ===")
     print(f"Total events in earthquake_history: {len(df_history)}")
