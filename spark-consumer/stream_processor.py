@@ -254,7 +254,7 @@ def catchup_from_usgs(spark, rf_model, df_history):
     end_str = now.strftime('%Y-%m-%dT%H:%M:%S')
     print(f"Catching up from USGS: {start_str} → {end_str}")
 
-    params = {"format": "geojson", "starttime": start_str, "endtime": end_str, "minmagnitude": "2.5"}
+    params = {"format": "geojson", "starttime": start_str, "endtime": end_str, "minmagnitude": "0.0"}
     try:
         resp = requests.get("https://earthquake.usgs.gov/fdsnws/event/1/query", params=params, timeout=30)
         if resp.status_code != 200:
