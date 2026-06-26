@@ -4,6 +4,9 @@ from pydantic import BaseModel
 from typing import List
 from datetime import datetime, timedelta, timezone
 
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import config
 
 app = FastAPI(title="Sistem Peringatan Dini Gempa API")

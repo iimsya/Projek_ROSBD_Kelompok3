@@ -77,6 +77,8 @@ services:
     environment:
       - KAFKA_BROKER=kafka:29092
       - CASSANDRA_HOST=cassandra
+    volumes:
+      - ..:/app
     depends_on:
       - kafka
       - cassandra
