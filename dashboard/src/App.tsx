@@ -1,8 +1,8 @@
-import { useEffect, useState, useMemo } from 'react'
+import { useEffect, useState } from 'react'
 import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet'
 import L from 'leaflet'
-import { Activity, MapPin, Clock, Filter, TrendingUp, Target, AlertTriangle } from 'lucide-react'
-import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid, PieChart, Pie, Cell } from 'recharts'
+import { Activity, MapPin, Clock, TrendingUp, AlertTriangle } from 'lucide-react'
+import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts'
 import './App.css'
 
 interface RecentEvent {
@@ -27,30 +27,12 @@ interface EventData {
   longitude: number;
 }
 
-interface AccuracyData {
-  total_predictions: number;
-  active_predictions: number;
-  expired_predictions: number;
-  checked_for_accuracy: number;
-  predicted_within_1day: number;
-  predicted_within_2days: number;
-  accuracy_pct_1day: number;
-  status_breakdown: { HIGH: number; MEDIUM: number; LOW: number };
-}
-
-interface VerificationItem {
-  grid_id: string;
-  place: string;
-  predicted_days: number;
-  predicted_magnitude: number;
-  actual_found: boolean;
-  actual_time: string;
-  actual_days_after_main: number;
-  delta_days: number;
-  actual_magnitude: number;
-  matched: boolean;
-  latitude: number;
-  longitude: number;
+interface ModelInfo {
+  version: string | null;
+  mae: number | null;
+  rmse: number | null;
+  r2: number | null;
+  trained_at: string | null;
 }
 
 const createIcon = (mag: number) => {
@@ -91,35 +73,19 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
 
-  const [accuracy, setAccuracy] = useState<AccuracyData | null>(null);
-  const [accuracyLoading, setAccuracyLoading] = useState(true);
+  const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
 
   const [filterMag, setFilterMag] = useState(false);
   const [viewMode, setViewMode] = useState<'all' | 'actual' | 'predictions'>('all');
-  const [rightTab, setRightTab] = useState<'actual' | 'predictions' | 'verification'>('actual');
-  const [verifications, setVerifications] = useState<VerificationItem[]>([]);
-  const [verificationLoading, setVerificationLoading] = useState(true);
+  const [rightTab, setRightTab] = useState<'actual' | 'predictions'>('actual');
   const [mapCenter, setMapCenter] = useState<[number, number] | null>(null);
 
-  const fetchAccuracy = async () => {
+  const fetchModelInfo = async () => {
     try {
-      const res = await fetch('http://localhost:8000/api/accuracy');
-      if (res.ok) setAccuracy(await res.json());
+      const res = await fetch('http://localhost:8000/api/model-info');
+      if (res.ok) setModelInfo(await res.json());
     } catch (e) {
-      console.error("Error fetching accuracy:", e);
-    } finally {
-      setAccuracyLoading(false);
-    }
-  };
-
-  const fetchVerification = async () => {
-    try {
-      const res = await fetch('http://localhost:8000/api/verification?limit=500');
-      if (res.ok) setVerifications(await res.json());
-    } catch (e) {
-      console.error("Error fetching verification:", e);
-    } finally {
-      setVerificationLoading(false);
+      console.error("Error fetching model info:", e);
     }
   };
 
@@ -145,11 +111,9 @@ function App() {
 
   useEffect(() => {
     fetchData();
-    fetchAccuracy();
-    fetchVerification();
+    fetchModelInfo();
     const interval = setInterval(() => {
       fetchData();
-      fetchVerification();
     }, 30000);
     return () => clearInterval(interval);
   }, []);
@@ -160,12 +124,6 @@ function App() {
     latitude: e.latitude,
     longitude: e.longitude,
   }));
-
-  const pieData = useMemo(() => [
-    { name: 'HIGH', value: accuracy?.status_breakdown.HIGH ?? 0, color: '#c05a5a' },
-    { name: 'MEDIUM', value: accuracy?.status_breakdown.MEDIUM ?? 0, color: '#c58b43' },
-    { name: 'LOW', value: accuracy?.status_breakdown.LOW ?? 0, color: '#599c7a' },
-  ], [accuracy]);
 
   const timeAgo = (timeStr: string) => {
     const diff = Date.now() - new Date(timeStr + 'Z').getTime();
@@ -240,38 +198,28 @@ function App() {
 
       <section className="stats-bar glass-panel">
         <div className="stat-card">
-          <span className="stat-label">Total Predicted Grids</span>
-          <span className="stat-value">{accuracy?.total_predictions ?? '-'}</span>
+          <span className="stat-label">Total Grids</span>
+          <span className="stat-value">{predictions.length}</span>
         </div>
         <div className="stat-divider" />
         <div className="stat-card">
           <span className="stat-label">Active</span>
-          <span className="stat-value active">{accuracy?.active_predictions ?? '-'}</span>
+          <span className="stat-value active">{predictions.filter(p => !isExpired(p) && within30Days(p)).length}</span>
         </div>
         <div className="stat-divider" />
         <div className="stat-card">
-          <span className="stat-label">Expired</span>
-          <span className="stat-value expired">{accuracy?.expired_predictions ?? '-'}</span>
+          <span className="stat-label">MAE</span>
+          <span className="stat-value">{modelInfo?.mae?.toFixed(2) ?? '-'}</span>
         </div>
         <div className="stat-divider" />
         <div className="stat-card">
-          <span className="stat-label">Verified</span>
-          <span className="stat-value">{accuracyLoading ? '...' : accuracy?.checked_for_accuracy ?? '-'}</span>
+          <span className="stat-label">Version</span>
+          <span className="stat-value">{modelInfo?.version ?? '-'}</span>
         </div>
         <div className="stat-divider" />
         <div className="stat-card">
-          <span className="stat-label">Matched</span>
-          <span className="stat-value accuracy">{accuracyLoading ? '...' : accuracy ? `${accuracy.accuracy_pct_1day}%` : '-'}</span>
-        </div>
-        <div className="stat-divider" />
-        <div className="stat-card">
-          <span className="stat-label">HIGH Risk</span>
-          <span className="stat-value high">{accuracy?.status_breakdown.HIGH ?? '-'}</span>
-        </div>
-        <div className="stat-divider" />
-        <div className="stat-card">
-          <span className="stat-label">MEDIUM Risk</span>
-          <span className="stat-value medium">{accuracy?.status_breakdown.MEDIUM ?? '-'}</span>
+          <span className="stat-label">Last Train</span>
+          <span className="stat-value">{modelInfo?.trained_at ? new Date(modelInfo.trained_at+'Z').toLocaleDateString() : '-'}</span>
         </div>
       </section>
 
@@ -380,32 +328,6 @@ function App() {
                 </ResponsiveContainer>
               </div>
             </section>
-
-            <section className="pie-section glass-panel">
-              <div className="alerts-header">
-                <Target size={24} color="#3b82f6" />
-                <h2>Risk Distribution</h2>
-              </div>
-              <div style={{ width: '100%', height: '180px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie data={pieData} cx="50%" cy="50%" innerRadius={45} outerRadius={75} paddingAngle={4} dataKey="value">
-                      {pieData.map((entry, i) => <Cell key={i} fill={entry.color} />)}
-                    </Pie>
-                    <Tooltip />
-                  </PieChart>
-                </ResponsiveContainer>
-                <div className="pie-legend">
-                  {pieData.map(d => (
-                    <div key={d.name} className="pie-legend-item">
-                      <span className="pie-dot" style={{ background: d.color }} />
-                      <span>{d.name}</span>
-                      <span className="pie-count">{d.value}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </section>
           </div>
         </div>
 
@@ -414,7 +336,6 @@ function App() {
           <div className="tab-bar">
             <button className={`tab-btn ${rightTab === 'actual' ? 'active' : ''}`} onClick={() => setRightTab('actual')}>Actual</button>
             <button className={`tab-btn ${rightTab === 'predictions' ? 'active' : ''}`} onClick={() => setRightTab('predictions')}>Prediksi</button>
-            <button className={`tab-btn ${rightTab === 'verification' ? 'active' : ''}`} onClick={() => setRightTab('verification')}>Verifikasi</button>
           </div>
 
           {rightTab === 'actual' && (
@@ -484,44 +405,6 @@ function App() {
                     );
                   })}
                   {activePredictions.length === 0 && <div className="loading-container"><p>Tidak ada prediksi aktif.</p></div>}
-                </div>
-              )}
-            </>
-          )}
-
-          {rightTab === 'verification' && (
-            <>
-              <div className="alerts-header" style={{ flexWrap: 'wrap', gap: '8px', marginBottom: '8px', marginTop: '12px' }}>
-                <Target size={20} color="#8b5cf6" />
-                <h2 style={{ fontSize: '1.1rem' }}>Prediksi vs Actual</h2>
-                <span style={{marginLeft: 'auto', fontSize: '0.8rem', color: 'var(--text-tertiary)'}}>
-                  {verifications.filter(v => v.actual_found).length} matched
-                </span>
-              </div>
-              {verificationLoading ? (
-                <div className="loading-container"><div className="spinner"></div></div>
-              ) : verifications.length === 0 ? (
-                <div className="loading-container"><p>Belum ada data verifikasi.</p></div>
-              ) : (
-                <div className="alerts-list">
-                  <div className="verif-table">
-                    <div className="verif-row verif-header">
-                      <span className="verif-cell place">Place</span>
-                      <span className="verif-cell num">Pred</span>
-                      <span className="verif-cell num">Actual</span>
-                      <span className="verif-cell num">Delta</span>
-                      <span className="verif-cell match">✓</span>
-                    </div>
-                    {verifications.map(v => (
-                      <div key={v.grid_id} className={`verif-row ${v.actual_found && v.delta_days <= 1 ? 'matched' : ''}`} onClick={() => { if (v.latitude) setMapCenter([v.latitude, v.longitude]); }} style={{ cursor: v.latitude ? 'pointer' : 'default' }}>
-                        <span className="verif-cell place" title={v.place}>{v.place}</span>
-                        <span className="verif-cell num">{v.predicted_days.toFixed(2)}</span>
-                        <span className="verif-cell num">{v.actual_found ? v.actual_days_after_main.toFixed(2) : '-'}</span>
-                        <span className="verif-cell num" style={{ color: v.actual_found && v.delta_days > 1 ? '#ef4444' : v.actual_found ? '#10b981' : 'var(--text-tertiary)' }}>{v.actual_found ? v.delta_days.toFixed(2) : '-'}</span>
-                        <span className="verif-cell match">{v.actual_found ? (v.matched ? '✅' : '❌') : 'N/A'}</span>
-                      </div>
-                    ))}
-                  </div>
                 </div>
               )}
             </>
