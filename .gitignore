@@ -5,3 +5,7 @@ __pycache__/
 .ipynb_checkpoints/
 checkpoint_dir*/
 ml-model/spark_rf_model/
+.venv/
+*.ipynb
+diagrams/
+ROSBD.pdf
